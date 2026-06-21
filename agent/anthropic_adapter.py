@@ -464,9 +464,18 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
     blocks so history matches ``tools[]``. Returns the new ``system``; tools and messages are
     mutated in place."""
     cc_block = {"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}
+    # Local-fork identity override: upstream declined this billing classification
+    # workaround. Impersonating the first-party CLI may risk account action.
+    billing_block = {
+        "type": "text",
+        "text": (
+            f"x-anthropic-billing-header: cc_version={_get_claude_code_version()}; "
+            "cc_entrypoint=sdk-cli;"
+        ),
+    }
     if isinstance(system, str) and system:
         system = [{"type": "text", "text": system}]
-    system = [cc_block] + (system if isinstance(system, list) else [])
+    system = [billing_block, cc_block] + (system if isinstance(system, list) else [])
     for block in system:
         if isinstance(block, dict) and block.get("type") == "text":
             text = block.get("text", "")
