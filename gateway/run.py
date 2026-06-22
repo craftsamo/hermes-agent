@@ -8887,6 +8887,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             and running_agent
             and running_agent is not _AGENT_PENDING_SENTINEL
         ):
+            interrupt_event = getattr(adapter, "_active_sessions", {}).get(
+                session_key
+            )
+            if interrupt_event is not None:
+                interrupt_event.set()
             try:
                 _interrupt_text = event.text
                 _media_urls = getattr(event, "media_urls", None) or []
@@ -19013,77 +19018,118 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return bool(getattr(self.config, "stt_echo_transcripts", True))
 
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
-        """Generate TTS audio and send as a voice message before the text reply."""
-        audio_path = None
-        actual_path = None
+        """Generate TTS audio and send as voice message(s) before the text reply.
+
+        Long replies are split into sentence-ish chunks (``voice.tts_streaming``)
+        and each chunk is delivered as its own voice note / voice-channel clip, so
+        the first audio arrives in seconds instead of after the whole reply
+        finishes synthesizing. Streaming off (or a single chunk) keeps the
+        original single-note behavior. Reply anchoring + push notification land on
+        the first note only; later notes share the same thread metadata.
+        """
         try:
-            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
+            from tools.tts_tool import (
+                text_to_speech_tool,
+                _strip_markdown_for_tts,
+                _tts_streaming_cfg,
+            )
+            from tools.tts_streaming import split_tts_text
 
             tts_text = _strip_markdown_for_tts(text[:4000])
             if not tts_text:
                 return
 
-            # Platform-aware output path: platforms whose native voice
-            # bubbles require Ogg/Opus (OPUS_VOICE_PLATFORMS — Telegram,
-            # Matrix, Feishu, WhatsApp, Signal) get an explicit .ogg path;
-            # the TTS tool's central container repair guarantees real
-            # Ogg/Opus bytes for every provider. Others keep MP3.
-            audio_path = build_auto_tts_output_path(event.source.platform)
-
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
-            try:
-                result = json.loads(result_json)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Auto voice reply TTS returned invalid JSON: %s", result_json[:200] if result_json else result_json)
-                return
-
-            # Use the actual file path from result (may differ after opus conversion)
-            actual_path = result.get("file_path", audio_path)
-            if not result.get("success") or not os.path.isfile(actual_path):
-                logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
-                return
+            stream_on, lo, hi, _ = _tts_streaming_cfg()
+            chunks = (
+                split_tts_text(tts_text, lo, hi)
+                if stream_on else [tts_text]
+            ) or [tts_text]
 
             adapter = self._adapter_for_source(event.source)
+            session_key = self._session_key_for_source(event.source)
+            interrupt_event = getattr(adapter, "_active_sessions", {}).get(
+                session_key
+            )
+            pending_messages = getattr(adapter, "_pending_messages", {})
+
+            def _is_stale_voice_reply() -> bool:
+                return bool(
+                    interrupt_event is not None
+                    and interrupt_event.is_set()
+                    and session_key in pending_messages
+                )
 
             # If connected to a voice channel, play there instead of sending a file
             guild_id = self._get_guild_id(event)
-            if (guild_id
-                    and hasattr(adapter, "play_in_voice_channel")
-                    and hasattr(adapter, "is_in_voice_channel")
-                    and adapter.is_in_voice_channel(guild_id)):
-                await adapter.play_in_voice_channel(guild_id, actual_path)
-            elif adapter and hasattr(adapter, "send_voice"):
-                reply_anchor = self._reply_anchor_for_event(event)
-                thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-                # Mark the auto voice reply as notify-worthy.  Mirrors the
-                # final-text path in gateway/platforms/base.py which sets
-                # ``notify=True`` so platform adapters that gate push
-                # notifications (Telegram "important" mode) deliver the
-                # final voice reply as a normal notification instead of a
-                # silent message.  Clone first so we don't mutate metadata
-                # shared with concurrent typing-indicator state.
-                if thread_meta is not None:
-                    thread_meta = dict(thread_meta)
-                    thread_meta["notify"] = True
-                else:
-                    thread_meta = {"notify": True}
-                send_kwargs: Dict[str, Any] = {
-                    "chat_id": event.source.chat_id,
-                    "audio_path": actual_path,
-                    "reply_to": reply_anchor,
-                    "metadata": thread_meta,
-                }
-                await adapter.send_voice(**send_kwargs)
+            in_voice_channel = bool(
+                guild_id
+                and hasattr(adapter, "play_in_voice_channel")
+                and hasattr(adapter, "is_in_voice_channel")
+                and adapter.is_in_voice_channel(guild_id)
+            )
+            reply_anchor = self._reply_anchor_for_event(event)
+            # Mirrors the final-text path in gateway/platforms/base.py which sets
+            # ``notify=True`` so adapters that gate push notifications (Telegram
+            # "important" mode) deliver the voice reply as a real notification.
+            # Computed once from the source so every chunk lands in the same
+            # thread; only the first note carries the reply anchor + notify.
+            base_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+
+            for idx, chunk in enumerate(chunks):
+                if _is_stale_voice_reply():
+                    break
+                # Preserve the central platform-aware Opus routing contract.
+                audio_path = build_auto_tts_output_path(event.source.platform)
+                actual_path = None
+                try:
+                    result_json = await asyncio.to_thread(
+                        text_to_speech_tool, text=chunk, output_path=audio_path
+                    )
+                    try:
+                        result = json.loads(result_json)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Auto voice reply TTS returned invalid JSON: %s", result_json[:200] if result_json else result_json)
+                        continue
+
+                    # Use the actual file path from result (may differ after opus conversion)
+                    actual_path = result.get("file_path", audio_path)
+                    if not result.get("success") or not os.path.isfile(actual_path):
+                        logger.warning(
+                            "Auto voice reply TTS failed (chunk %d/%d): %s",
+                            idx + 1, len(chunks), result.get("error"),
+                        )
+                        continue
+
+                    if _is_stale_voice_reply():
+                        continue
+
+                    # If connected to a voice channel, play there instead of sending a file
+                    if in_voice_channel:
+                        await adapter.play_in_voice_channel(guild_id, actual_path)
+                    elif adapter and hasattr(adapter, "send_voice"):
+                        # Clone the shared metadata so we don't mutate state
+                        # shared with concurrent typing-indicator updates.
+                        meta = dict(base_meta) if base_meta else {}
+                        meta["notify"] = (idx == 0)
+                        await adapter.send_voice(
+                            chat_id=event.source.chat_id,
+                            audio_path=actual_path,
+                            reply_to=reply_anchor if idx == 0 else None,
+                            metadata=meta,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Auto voice reply chunk %d/%d failed: %s",
+                        idx + 1, len(chunks), e, exc_info=True,
+                    )
+                finally:
+                    for p in {audio_path, actual_path} - {None}:
+                        try:
+                            os.unlink(p)
+                        except OSError:
+                            pass
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
-        finally:
-            for p in {audio_path, actual_path} - {None}:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
 
     async def _deliver_media_from_response(
         self,

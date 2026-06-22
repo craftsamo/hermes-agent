@@ -1568,6 +1568,9 @@ DEFAULT_CONFIG = {
         # voice chat instead of being sent to the agent. Case-insensitive,
         # surrounding punctuation ignored. Set [] to disable.
         "stop_phrases": ["stop"],
+        "tts_streaming": True,        # Split gateway voice replies for earlier delivery
+        "tts_min_chunk_chars": 15,    # Merge short sentence fragments before TTS
+        "tts_max_chunk_chars": 100,   # Soft-split long gateway TTS chunks
     },
 
     # "Hey Hermes" hands-free wake word. Always-on, on-device hotword

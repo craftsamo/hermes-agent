@@ -5802,6 +5802,12 @@ class BasePlatformAdapter(ABC):
         # Fall back to a new Event only if the entry was removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
+
+        def _is_stale_response() -> bool:
+            return (
+                interrupt_event.is_set()
+                and session_key in self._pending_messages
+            )
         
         # Start continuous typing indicator (refreshes every 2 seconds).
         # Gated per-platform: when typing_indicator=False the refresh loop is
@@ -5857,8 +5863,7 @@ class BasePlatformAdapter(ABC):
             # is processed by the pending-message handler below (#8221/#2483).
             if (
                 response
-                and interrupt_event.is_set()
-                and session_key in self._pending_messages
+                and _is_stale_response()
             ):
                 logger.info(
                     "[%s] Suppressing stale response for interrupted session %s",
@@ -5949,14 +5954,18 @@ class BasePlatformAdapter(ABC):
                 # thread-strict.
                 _final_thread_metadata = _mark_notify_metadata(_thread_metadata)
 
-                # Auto-TTS: if voice message, generate audio FIRST (before sending text)
-                # Gated via ``_should_auto_tts_for_chat``: fires when the chat has
-                # an explicit ``/voice on|tts`` opt-in OR when ``voice.auto_tts`` is
-                # True globally and no ``/voice off`` has been issued.
+                # Auto-TTS: when the user sent a voice message, synthesize the
+                # reply as voice. Long replies are split into sentence-ish
+                # chunks (voice.tts_streaming) and each chunk is delivered as
+                # its own voice note, so the first audio arrives in seconds
+                # instead of after the whole reply finishes synthesizing. The
+                # full reply text rides as the caption of the first note only.
+                # Gated via ``_should_auto_tts_for_chat`` (``/voice on|tts`` or
+                # global ``voice.auto_tts`` with no ``/voice off``). Streaming
+                # off (or a single chunk) keeps the original single-note flow.
                 # Skip when streaming TTS already delivered audio for this turn
                 # (#60671) — the gateway streaming-TTS consumer sets the flag.
-                _tts_path = None
-                _tts_requested_path = None
+                _tts_caption_delivered = False
                 if (self._should_auto_tts_for_chat(event.source.chat_id)
                         and event.message_type == MessageType.VOICE
                         and text_content
@@ -5967,71 +5976,98 @@ class BasePlatformAdapter(ABC):
                             event=event,
                         )):
                     try:
-                        from tools.tts_tool import text_to_speech_tool, check_tts_requirements
+                        import json as _json
+                        from tools.tts_tool import (
+                            text_to_speech_tool,
+                            check_tts_requirements,
+                            _tts_streaming_cfg,
+                        )
+                        from tools.tts_streaming import split_tts_text
                         if check_tts_requirements():
-                            import json as _json
                             speech_text = self.prepare_tts_text(text_content)
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
-                            # Pass an explicit platform-aware output path: the
-                            # HERMES_SESSION_PLATFORM contextvar the tool would
-                            # otherwise consult is already cleared by the time
-                            # this post-handler block runs, which silently
-                            # produced MP3 (audio attachment, not a native
-                            # voice bubble) on Opus platforms (#57049, #36685).
-                            _tts_requested_path = build_auto_tts_output_path(
-                                self.platform
-                            )
-                            tts_result_str = await asyncio.to_thread(
-                                text_to_speech_tool,
-                                text=speech_text,
-                                output_path=_tts_requested_path,
-                            )
-                            tts_data = _json.loads(tts_result_str)
-                            if tts_data.get("success", True):
-                                _tts_path = tts_data.get("file_path") or _tts_requested_path
+
+                            _stream_on, _lo, _hi, _ = _tts_streaming_cfg()
+                            _chunks = (
+                                split_tts_text(speech_text, _lo, _hi)
+                                if _stream_on else [speech_text]
+                            ) or [speech_text]
+
+                            _caption = None
+                            if (
+                                self.platform == Platform.TELEGRAM
+                                and text_content
+                                and text_content[:1024] == text_content
+                            ):
+                                _caption = text_content
+
+                            for _i, _chunk in enumerate(_chunks):
+                                if _is_stale_response():
+                                    break
+                                # The caller still knows the platform here;
+                                # preserve the central Opus routing contract.
+                                _out = build_auto_tts_output_path(self.platform)
+                                _actual = None
+                                try:
+                                    _res_str = await asyncio.to_thread(
+                                        text_to_speech_tool,
+                                        text=_chunk,
+                                        output_path=_out,
+                                    )
+                                    _res = _json.loads(_res_str)
+                                    if _is_stale_response():
+                                        continue
+                                    if _res.get("success", True):
+                                        _actual = _res.get("file_path") or _out
+                                    if not _actual or not Path(_actual).exists():
+                                        logger.warning(
+                                            "[%s] Auto-TTS chunk %d/%d produced no audio: %s",
+                                            self.name, _i + 1, len(_chunks),
+                                            _res.get("error"),
+                                        )
+                                        continue
+                                    _r = await self.play_tts(
+                                        chat_id=event.source.chat_id,
+                                        audio_path=_actual,
+                                        caption=(
+                                            _caption
+                                            if not _tts_caption_delivered else None
+                                        ),
+                                        metadata=_final_thread_metadata,
+                                    )
+                                    if (
+                                        _caption
+                                        and not _tts_caption_delivered
+                                        and getattr(_r, "success", False)
+                                    ):
+                                        _tts_caption_delivered = True
+                                except Exception as _chunk_err:
+                                    logger.warning(
+                                        "[%s] Auto-TTS chunk %d/%d failed: %s",
+                                        self.name, _i + 1, len(_chunks), _chunk_err,
+                                    )
+                                finally:
+                                    for _p in {_out, _actual} - {None}:
+                                        try:
+                                            os.remove(_p)
+                                        except OSError:
+                                            pass
                     except Exception as tts_err:
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
 
-                # Play TTS audio before text (voice-first experience)
-                _tts_caption_delivered = False
-                _tts_cleanup_paths = {_tts_requested_path, _tts_path} - {None}
-                if _tts_path and Path(_tts_path).exists():
-                    try:
-                        # Caption eligibility and payload stay on the ORIGINAL
-                        # reply text. The spoken script is for synthesis only:
-                        # normalization can shrink a long reply below the
-                        # 1024-char caption limit, and captioning that spoken
-                        # form would suppress the full formatted reply the
-                        # user is meant to receive as a separate message.
-                        telegram_tts_caption = None
-                        if (
-                            self.platform == Platform.TELEGRAM
-                            and text_content
-                            and text_content[:1024] == text_content
-                        ):
-                            telegram_tts_caption = text_content
-                        tts_result = await self.play_tts(
-                            chat_id=event.source.chat_id,
-                            audio_path=_tts_path,
-                            caption=telegram_tts_caption,
-                            metadata=_final_thread_metadata,
-                        )
-                        _tts_caption_delivered = bool(
-                            telegram_tts_caption and getattr(tts_result, "success", False)
-                        )
-                    finally:
-                        for _cleanup_path in _tts_cleanup_paths:
-                            try:
-                                os.remove(_cleanup_path)
-                            except OSError:
-                                pass
-                elif _tts_cleanup_paths:
-                    for _cleanup_path in _tts_cleanup_paths:
-                        try:
-                            os.remove(_cleanup_path)
-                        except OSError:
-                            pass
+                if _is_stale_response():
+                    logger.info(
+                        "[%s] Stopping stale delivery for interrupted session %s",
+                        self.name,
+                        session_key,
+                    )
+                    response = None
+                    text_content = ""
+                    images = []
+                    local_files = []
+                    media_files = []
+                    _response_pre_extract = ""
 
                 # Send the text portion. A reconnect may have replaced this
                 # adapter while its in-flight handler was still producing a

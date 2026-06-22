@@ -43,6 +43,16 @@ class TestSentenceChunker:
             "A paragraph without punctuation\n\n"
         ]
 
+    def test_completed_text_uses_cjk_boundaries_and_soft_limits(self):
+        chunks = ts.split_tts_text(
+            "最初です。次です！word word word word",
+            min_len=1,
+            max_len=10,
+        )
+
+        assert chunks[:2] == ["最初です。", "次です！"]
+        assert all(len(chunk) <= 10 for chunk in chunks)
+
 
 # ── Interruption latch ───────────────────────────────────────────────────
 

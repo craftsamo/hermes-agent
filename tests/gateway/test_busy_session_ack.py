@@ -3,6 +3,7 @@
 Verifies that users get an immediate status response instead of total silence
 when the agent is working on a task. See PR fix for the @Lonely__MH report.
 """
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -82,6 +83,7 @@ def _make_adapter(platform_val="telegram"):
     """Build a minimal adapter mock."""
     adapter = MagicMock()
     adapter._pending_messages = {}
+    adapter._active_sessions = {}
     adapter._send_with_retry = AsyncMock()
     adapter.config = MagicMock()
     adapter.config.extra = {}
@@ -157,6 +159,8 @@ class TestBusySessionAck:
 
         event = _make_event(text="Are you working?")
         sk = build_session_key(event.source)
+        interrupt_event = asyncio.Event()
+        adapter._active_sessions[sk] = interrupt_event
 
         # Simulate running agent
         agent = MagicMock()
@@ -184,6 +188,7 @@ class TestBusySessionAck:
             content = str(call_kwargs)
         assert "Interrupting" in content or "respond" in content
         assert "/stop" not in content  # no need — we ARE interrupting
+        assert interrupt_event.is_set()
 
         # Verify agent interrupt was called
         agent.interrupt.assert_called_once_with("Are you working?")
@@ -469,5 +474,4 @@ class TestLongRunningNotificationOwnership:
         assert runner._should_emit_long_running_notification(
             "sess", original_agent, executor_task=None
         ) is False
-
 

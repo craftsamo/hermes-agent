@@ -81,9 +81,13 @@ def take_speech_interrupted() -> bool:
     at, _interrupted_at = _interrupted_at, None
     return at is not None and time.monotonic() - at < _INTERRUPT_TTL_S
 
-# Sentence boundary: after .!? followed by whitespace, or a blank line.
-SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])(?:\s|\n)|(?:\n\n)")
+# Sentence boundary: after ASCII punctuation plus whitespace, after CJK
+# punctuation, or at a blank line.
+SENTENCE_BOUNDARY_RE = re.compile(
+    r"(?<=[.!?])(?:\s|\n)|(?<=[。．！？…])|(?:\n\n)"
+)
 _THINK_BLOCK_RE = re.compile(r"<think[\s>].*?</think>", flags=re.DOTALL)
+_SOFT_BREAK_CHARS = "、，,;:　 \t"
 
 
 class SentenceChunker:
@@ -122,6 +126,40 @@ class SentenceChunker:
         tail = _THINK_BLOCK_RE.sub("", self.buf).strip()
         self.buf = ""
         return [tail] if tail else []
+
+
+def split_tts_text(
+    text: str,
+    min_len: int = 15,
+    max_len: int = 100,
+) -> List[str]:
+    """Split completed text with the same boundaries as streaming speech."""
+    if not text or not text.strip():
+        return []
+
+    min_len = max(1, min_len)
+    max_len = max(min_len, max_len)
+    chunker = SentenceChunker(min_len=min_len)
+    pending = chunker.feed(text)
+    pending.extend(chunker.flush())
+
+    chunks: List[str] = []
+    for pending_chunk in pending:
+        remaining = pending_chunk
+        while len(remaining.strip()) > max_len:
+            window = remaining[:max_len]
+            cut = max_len
+            for index in range(len(window) - 1, 0, -1):
+                if window[index] in _SOFT_BREAK_CHARS:
+                    cut = index + 1
+                    break
+            chunk = remaining[:cut].strip()
+            if chunk:
+                chunks.append(chunk)
+            remaining = remaining[cut:]
+        if remaining.strip():
+            chunks.append(remaining.strip())
+    return chunks
 
 
 # ---------------------------------------------------------------------------

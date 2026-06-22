@@ -7,9 +7,11 @@ it as a normal push instead of a silent message — mirroring the existing
 final-text path in ``gateway/platforms/base.py``.
 """
 
+import asyncio
 import json
 import os
 import tempfile
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -42,6 +44,8 @@ def _runner_with_adapter(send_voice_mock):
     adapter = SimpleNamespace(
         send_voice=send_voice_mock,
         is_in_voice_channel=lambda *_a, **_k: False,
+        _active_sessions={},
+        _pending_messages={},
     )
     runner.adapters = {Platform.TELEGRAM: adapter}
     return runner
@@ -96,3 +100,50 @@ async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monke
         event.source, runner._reply_anchor_for_event(event)
     )
     assert "notify" not in fresh
+@pytest.mark.asyncio
+async def test_voice_reply_stops_when_interrupted_during_synthesis(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "tools.tts_tool._strip_markdown_for_tts",
+        lambda text: text,
+    )
+    monkeypatch.setattr(
+        "tools.tts_streaming.split_tts_text",
+        lambda _text, _lo, _hi: ["one", "two", "three"],
+    )
+
+    second_started = threading.Event()
+    release_second = threading.Event()
+    synthesized = []
+
+    def fake_tts(*, text, output_path, **_kwargs):
+        synthesized.append(text)
+        if text == "two":
+            second_started.set()
+            assert release_second.wait(timeout=5)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as fh:
+            fh.write(b"audio")
+        return json.dumps({"success": True, "file_path": output_path})
+
+    monkeypatch.setattr("tools.tts_tool.text_to_speech_tool", fake_tts)
+    send_voice = AsyncMock(return_value=SimpleNamespace(success=True))
+    runner = _runner_with_adapter(send_voice)
+    event = _make_event()
+    event.metadata["_tts_streaming_cfg"] = (True, 1, 10, 0)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    session_key = runner._session_key_for_source(event.source)
+    interrupt_event = asyncio.Event()
+    adapter._active_sessions[session_key] = interrupt_event
+
+    task = asyncio.create_task(runner._send_voice_reply(event, "multi-part"))
+    assert await asyncio.to_thread(second_started.wait, 5)
+    interrupt_event.set()
+    adapter._pending_messages[session_key] = _make_event()
+    release_second.set()
+    await task
+
+    assert synthesized == ["one", "two"]
+    send_voice.assert_awaited_once()

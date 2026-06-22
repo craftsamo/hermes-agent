@@ -53,6 +53,23 @@ class _DummyAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
+class _StreamingDummyAdapter(_DummyAdapter):
+    def __init__(self, platform: Platform):
+        super().__init__(platform)
+        self.played = []
+        self.interrupt_followup = None
+
+    async def play_tts(
+        self, chat_id, audio_path, caption=None, metadata=None
+    ) -> SendResult:
+        self.played.append(audio_path)
+        if len(self.played) == 1 and self.interrupt_followup is not None:
+            session_key = next(iter(self._active_sessions))
+            self._active_sessions[session_key].set()
+            self._pending_messages[session_key] = self.interrupt_followup
+        return SendResult(success=True, message_id="tts-1")
+
+
 def _make_voice_event(platform: Platform) -> MessageEvent:
     return MessageEvent(
         text="hello",
@@ -141,3 +158,55 @@ async def test_base_auto_tts_skips_playback_when_tool_reports_failure():
     adapter.play_tts.assert_not_awaited()
     # Text reply still goes out.
     assert adapter.sent and adapter.sent[0]["content"] == "reply text"
+
+
+@pytest.mark.asyncio
+async def test_base_auto_tts_stops_stale_audio_and_text_after_interrupt():
+    adapter = _StreamingDummyAdapter(Platform.TELEGRAM)
+    adapter._keep_typing = _hold_typing()
+    adapter._should_auto_tts_for_chat = lambda _chat_id: True
+    original = _make_voice_event(Platform.TELEGRAM)
+    followup = MessageEvent(
+        text="new question",
+        message_type=MessageType.TEXT,
+        source=original.source,
+        message_id="followup-1",
+    )
+    adapter.interrupt_followup = followup
+    adapter._run_processing_hook = AsyncMock()
+    adapter.set_message_handler(
+        lambda event: asyncio.sleep(
+            0,
+            result="old stale text" if event is original else None,
+        )
+    )
+    original.metadata["_tts_streaming_cfg"] = (True, 1, 10, 0)
+    synthesized = []
+
+    def fake_tts(*, text, output_path=None):
+        from pathlib import Path
+
+        synthesized.append(text)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"fake audio")
+        return json.dumps({"success": True, "file_path": output_path})
+
+    with patch("tools.tts_tool.check_tts_requirements", return_value=True), patch(
+        "tools.tts_tool.text_to_speech_tool", side_effect=fake_tts
+    ), patch(
+        "tools.tts_streaming.split_tts_text",
+        return_value=["one", "two", "three"],
+    ):
+        await adapter._process_message_background(
+            original, build_session_key(original.source)
+        )
+
+    assert synthesized == ["one"]
+    assert len(adapter.played) == 1
+    assert not adapter.sent
+    assert any(
+        call.args[0] == "on_processing_complete"
+        and call.args[1] is original
+        for call in adapter._run_processing_hook.await_args_list
+    )
+    assert build_session_key(original.source) not in adapter._pending_messages

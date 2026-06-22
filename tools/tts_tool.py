@@ -3441,6 +3441,36 @@ class _SyncSentencePipeline:
                         pass
 
 
+def _tts_streaming_cfg() -> tuple:
+    """Return gateway chunking settings plus the legacy prebuffer value.
+
+    Reads ``voice.tts_streaming`` / ``voice.tts_min_chunk_chars`` /
+    ``voice.tts_max_chunk_chars`` / ``voice.tts_prebuffer_chunks`` (best-effort;
+    documented defaults on error). ``prebuffer`` is how many chunks to render
+    before playback starts (0 = play as soon as the first chunk is ready;
+    higher trades first-audio latency for fewer early gaps).
+    """
+    enabled, lo, hi, prebuf = True, 15, 100, 0
+    try:
+        from hermes_cli.config import load_config
+
+        voice_cfg = load_config().get("voice", {})
+        if isinstance(voice_cfg, dict):
+            enabled = bool(voice_cfg.get("tts_streaming", True))
+            lo_cfg = voice_cfg.get("tts_min_chunk_chars", lo)
+            hi_cfg = voice_cfg.get("tts_max_chunk_chars", hi)
+            pb_cfg = voice_cfg.get("tts_prebuffer_chunks", prebuf)
+            if isinstance(lo_cfg, int) and not isinstance(lo_cfg, bool) and lo_cfg > 0:
+                lo = lo_cfg
+            if isinstance(hi_cfg, int) and not isinstance(hi_cfg, bool) and hi_cfg > 0:
+                hi = hi_cfg
+            if isinstance(pb_cfg, int) and not isinstance(pb_cfg, bool) and pb_cfg >= 0:
+                prebuf = min(pb_cfg, 8)
+    except Exception:
+        pass
+    return enabled, lo, max(hi, lo), prebuf
+
+
 def stream_tts_to_speaker(
     text_queue: queue.Queue,
     stop_event: threading.Event,
