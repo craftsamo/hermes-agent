@@ -2,6 +2,7 @@
 
 import os
 import struct
+import threading
 import time
 import wave
 from pathlib import Path
@@ -909,6 +910,30 @@ class TestPlaybackInterrupt:
         mock_proc.terminate.assert_called_once()
 
         with _playback_lock:
+            assert vm._active_playback is None
+
+    def test_cancelled_playback_is_rejected_before_registration(
+        self, monkeypatch, sample_wav
+    ):
+        import tools.voice_mode as vm
+
+        monkeypatch.setattr(
+            vm,
+            "_import_audio",
+            MagicMock(side_effect=ImportError("no sounddevice")),
+        )
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/" + cmd)
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        monkeypatch.setattr("subprocess.Popen", MagicMock(return_value=mock_proc))
+        cancel = threading.Event()
+        cancel.set()
+
+        result = vm.play_audio_file(sample_wav, cancel_event=cancel)
+
+        assert result is False
+        mock_proc.terminate.assert_called_once()
+        with vm._playback_lock:
             assert vm._active_playback is None
 
 # ============================================================================

@@ -3430,7 +3430,7 @@ class _SyncSentencePipeline:
                         and os.path.isfile(tmp_path)
                         and os.path.getsize(tmp_path) > 0):
                     from tools.voice_mode import play_audio_file
-                    play_audio_file(tmp_path)
+                    play_audio_file(tmp_path, cancel_event=self._stop)
             except Exception as exc:
                 logger.warning("Sync per-sentence TTS failed: %s", exc)
             finally:
@@ -3819,7 +3819,7 @@ def stream_tts_to_speaker(
                 # pile up).  Release the handle before playback and cleanup.
                 tmp.close()
                 from tools.voice_mode import play_audio_file
-                play_audio_file(tmp_path)
+                play_audio_file(tmp_path, cancel_event=stop_evt)
             except Exception as exc:
                 logger.warning("Temp-file TTS fallback failed: %s", exc)
             finally:

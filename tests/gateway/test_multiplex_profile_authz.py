@@ -132,3 +132,32 @@ def test_secondary_open_policy_fails_startup_guard(monkeypatch):
     assert violation is not None
     assert "wecom" in violation
     assert "open policy" in violation
+
+
+@pytest.mark.asyncio
+async def test_profile_handler_stamps_profile_scoped_tts_config(monkeypatch):
+    from gateway.platforms.base import MessageEvent
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._resolve_profile_home_for_source = lambda _source: "/profiles/coder"
+    runner._handle_message = AsyncMock(return_value="ok")
+    monkeypatch.setattr("gateway.run._profile_runtime_scope", lambda _home: nullcontext())
+    monkeypatch.setattr(
+        "tools.tts_tool._tts_streaming_cfg",
+        lambda: (False, 120, 400, 0),
+    )
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.WECOM,
+            chat_id="dm-chat",
+            profile=None,
+        ),
+    )
+
+    result = await runner._make_profile_message_handler("coder")(event)
+
+    assert result == "ok"
+    assert event.source.profile == "coder"
+    assert event._tts_streaming_cfg == (False, 120, 400, 0)

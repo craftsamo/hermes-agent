@@ -1549,7 +1549,10 @@ def _wsl_powershell_tts_available() -> bool:
     )
 
 
-def play_audio_file(file_path: str) -> bool:
+def play_audio_file(
+    file_path: str,
+    cancel_event: Optional[threading.Event] = None,
+) -> bool:
     """Play an audio file through the default output device.
 
     Strategy:
@@ -1557,7 +1560,8 @@ def play_audio_file(file_path: str) -> bool:
     2. System commands: ``afplay`` (macOS), ``ffplay`` (cross-platform),
        ``aplay`` (Linux ALSA).
 
-    Playback can be interrupted by calling ``stop_playback()``.
+    Playback can be interrupted by calling ``stop_playback()``. A pre-set
+    ``cancel_event`` also prevents a stale player from registering afterward.
 
     Returns:
         ``True`` if playback succeeded, ``False`` otherwise.
@@ -1566,12 +1570,15 @@ def play_audio_file(file_path: str) -> bool:
     # loop (and any other ambient cue) knows audio is flowing right now.
     mark_audio_output_active(True)
     try:
-        return _play_audio_file_impl(file_path)
+        return _play_audio_file_impl(file_path, cancel_event=cancel_event)
     finally:
         mark_audio_output_active(False)
 
 
-def _play_audio_file_impl(file_path: str) -> bool:
+def _play_audio_file_impl(
+    file_path: str,
+    cancel_event: Optional[threading.Event] = None,
+) -> bool:
     global _active_playback
 
     if not os.path.isfile(file_path):
@@ -1610,7 +1617,10 @@ def _play_audio_file_impl(file_path: str) -> bool:
             else:
                 blocksize = 0  # default (auto)
 
-            sd.play(audio_data, samplerate=sample_rate, blocksize=blocksize)
+            with _playback_lock:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
+                sd.play(audio_data, samplerate=sample_rate, blocksize=blocksize)
             # sd.wait() calls Event.wait() without timeout — hangs forever if
             # the audio device stalls.  Poll with a ceiling and force-stop.
             duration_secs = len(audio_data) / sample_rate
@@ -1704,7 +1714,17 @@ def _play_audio_file_impl(file_path: str) -> bool:
                     env=hermes_subprocess_env(inherit_credentials=False),
                 )
                 with _playback_lock:
-                    _active_playback = proc
+                    cancelled = cancel_event is not None and cancel_event.is_set()
+                    if not cancelled:
+                        _active_playback = proc
+                if cancelled:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    return False
                 proc.wait(timeout=300)
                 rc = proc.returncode
                 with _playback_lock:

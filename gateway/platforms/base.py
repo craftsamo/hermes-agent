@@ -5988,11 +5988,20 @@ class BasePlatformAdapter(ABC):
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
 
-                            _stream_on, _lo, _hi, _ = _tts_streaming_cfg()
+                            _stream_on, _lo, _hi, _ = (
+                                getattr(event, "_tts_streaming_cfg", None)
+                                or _tts_streaming_cfg()
+                            )
                             _chunks = (
                                 split_tts_text(speech_text, _lo, _hi)
                                 if _stream_on else [speech_text]
                             ) or [speech_text]
+                            if (
+                                len(_chunks) > 1
+                                and type(self).play_tts is BasePlatformAdapter.play_tts
+                                and type(self).send_voice is BasePlatformAdapter.send_voice
+                            ):
+                                _chunks = [speech_text]
 
                             _caption = None
                             if (
@@ -6002,6 +6011,7 @@ class BasePlatformAdapter(ABC):
                             ):
                                 _caption = text_content
 
+                            _tts_audio_delivered = False
                             for _i, _chunk in enumerate(_chunks):
                                 if _is_stale_response():
                                     break
@@ -6027,6 +6037,8 @@ class BasePlatformAdapter(ABC):
                                             _res.get("error"),
                                         )
                                         continue
+                                    _chunk_metadata = dict(_final_thread_metadata or {})
+                                    _chunk_metadata["notify"] = not _tts_audio_delivered
                                     _r = await self.play_tts(
                                         chat_id=event.source.chat_id,
                                         audio_path=_actual,
@@ -6034,8 +6046,10 @@ class BasePlatformAdapter(ABC):
                                             _caption
                                             if not _tts_caption_delivered else None
                                         ),
-                                        metadata=_final_thread_metadata,
+                                        metadata=_chunk_metadata,
                                     )
+                                    if getattr(_r, "success", True):
+                                        _tts_audio_delivered = True
                                     if (
                                         _caption
                                         and not _tts_caption_delivered

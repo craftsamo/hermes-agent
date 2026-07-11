@@ -410,7 +410,8 @@ def test_streamer_tempfile_fallback_after_reinit_exhausted(monkeypatch):
     # try to play audio — just count that it was called.
     play_calls: list[str] = []
 
-    def _fake_play(path):
+    def _fake_play(path, cancel_event=None):
+        assert cancel_event is stop
         play_calls.append(path)
 
     q = _drain_queue([
@@ -840,7 +841,8 @@ def _timed_sync_run(monkeypatch, sentences, *, synth_s=0.12, play_s=0.12,
         with lock:
             events.append(("synth", text, t0, time.monotonic() - origin))
 
-    def fake_play(path):
+    def fake_play(path, cancel_event=None):
+        assert cancel_event is stop
         t0 = time.monotonic() - origin
         time.sleep(play_s)
         with lock:

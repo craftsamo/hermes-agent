@@ -13491,6 +13491,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event.source.profile = profile_name
             except Exception:
                 pass
+            try:
+                from tools.tts_tool import _tts_streaming_cfg
+
+                if profile_home is not None:
+                    with _profile_runtime_scope(profile_home):
+                        event._tts_streaming_cfg = _tts_streaming_cfg()
+                else:
+                    event._tts_streaming_cfg = _tts_streaming_cfg()
+            except Exception:
+                pass
             if profile_home is not None:
                 with _profile_runtime_scope(profile_home):
                     return await self._handle_message(event)
@@ -19039,7 +19049,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not tts_text:
                 return
 
-            stream_on, lo, hi, _ = _tts_streaming_cfg()
+            stream_on, lo, hi, _ = (
+                getattr(event, "_tts_streaming_cfg", None)
+                or _tts_streaming_cfg()
+            )
             chunks = (
                 split_tts_text(tts_text, lo, hi)
                 if stream_on else [tts_text]
@@ -19067,6 +19080,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and hasattr(adapter, "is_in_voice_channel")
                 and adapter.is_in_voice_channel(guild_id)
             )
+            if (
+                len(chunks) > 1
+                and isinstance(adapter, BasePlatformAdapter)
+                and type(adapter).send_voice is BasePlatformAdapter.send_voice
+                and not in_voice_channel
+            ):
+                chunks = [tts_text]
             reply_anchor = self._reply_anchor_for_event(event)
             # Mirrors the final-text path in gateway/platforms/base.py which sets
             # ``notify=True`` so adapters that gate push notifications (Telegram
@@ -19075,6 +19095,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # thread; only the first note carries the reply anchor + notify.
             base_meta = self._thread_metadata_for_source(event.source, reply_anchor)
 
+            delivered = False
             for idx, chunk in enumerate(chunks):
                 if _is_stale_voice_reply():
                     break
@@ -19110,13 +19131,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # Clone the shared metadata so we don't mutate state
                         # shared with concurrent typing-indicator updates.
                         meta = dict(base_meta) if base_meta else {}
-                        meta["notify"] = (idx == 0)
-                        await adapter.send_voice(
+                        meta["notify"] = not delivered
+                        send_result = await adapter.send_voice(
                             chat_id=event.source.chat_id,
                             audio_path=actual_path,
-                            reply_to=reply_anchor if idx == 0 else None,
+                            reply_to=reply_anchor if not delivered else None,
                             metadata=meta,
                         )
+                        if getattr(send_result, "success", True):
+                            delivered = True
                 except Exception as e:
                     logger.warning(
                         "Auto voice reply chunk %d/%d failed: %s",

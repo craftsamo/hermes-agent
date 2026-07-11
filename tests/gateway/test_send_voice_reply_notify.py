@@ -101,6 +101,37 @@ async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monke
     )
     assert "notify" not in fresh
 @pytest.mark.asyncio
+async def test_voice_reply_notifies_first_successful_chunk(monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    _fake_tts_call(monkeypatch)
+    monkeypatch.setattr(
+        "tools.tts_tool._tts_streaming_cfg",
+        lambda: (True, 1, 10, 0),
+    )
+    monkeypatch.setattr(
+        "tools.tts_streaming.split_tts_text",
+        lambda _text, _lo, _hi: ["one", "two", "three"],
+    )
+
+    send_voice = AsyncMock(
+        side_effect=[
+            SimpleNamespace(success=False),
+            SimpleNamespace(success=True),
+            SimpleNamespace(success=True),
+        ]
+    )
+    runner = _runner_with_adapter(send_voice)
+    event = _make_event()
+
+    await runner._send_voice_reply(event, "A multi-part reply.")
+
+    assert send_voice.await_count == 3
+    calls = send_voice.await_args_list
+    assert [call.kwargs["metadata"]["notify"] for call in calls] == [True, True, False]
+    assert [call.kwargs["reply_to"] for call in calls] == ["m1", "m1", None]
+
+
+@pytest.mark.asyncio
 async def test_voice_reply_stops_when_interrupted_during_synthesis(
     monkeypatch, tmp_path
 ):
