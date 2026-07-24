@@ -13491,16 +13491,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event.source.profile = profile_name
             except Exception:
                 pass
-            try:
-                from tools.tts_tool import _tts_streaming_cfg
-
-                if profile_home is not None:
-                    with _profile_runtime_scope(profile_home):
-                        event._tts_streaming_cfg = _tts_streaming_cfg()
-                else:
-                    event._tts_streaming_cfg = _tts_streaming_cfg()
-            except Exception:
-                pass
             if profile_home is not None:
                 with _profile_runtime_scope(profile_home):
                     return await self._handle_message(event)
@@ -13523,6 +13513,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if getattr(self.config, "multiplex_profiles", False):
             return self._make_default_profile_message_handler()
         return self._handle_message
+
+    def _stamp_tts_streaming_config(self, event: MessageEvent) -> None:
+        """Keep routed TTS settings available after the profile scope exits."""
+        try:
+            from tools.tts_tool import _tts_streaming_cfg
+
+            profile_home = self._resolve_profile_home_for_source(event.source)
+            with _profile_runtime_scope(profile_home):
+                config = _tts_streaming_cfg()
+            if not isinstance(event.metadata, dict):
+                event.metadata = {}
+            event.metadata["_tts_streaming_cfg"] = config
+        except Exception:
+            logger.debug("Failed to snapshot routed TTS settings", exc_info=True)
 
     @staticmethod
     def _adapter_credential_claim(
@@ -14232,6 +14236,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         7. Return response
         """
         source = event.source
+        self._stamp_tts_streaming_config(event)
 
         # 🔴 Cross-session leak guard. This handler runs inside a per-message
         # asyncio task created via create_task(), which snapshots the spawning
@@ -19049,10 +19054,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not tts_text:
                 return
 
-            stream_on, lo, hi, _ = (
-                getattr(event, "_tts_streaming_cfg", None)
-                or _tts_streaming_cfg()
+            event_tts_config = (
+                event.metadata.get("_tts_streaming_cfg")
+                if isinstance(event.metadata, dict) else None
             )
+            stream_on, lo, hi, _ = event_tts_config or _tts_streaming_cfg()
             chunks = (
                 split_tts_text(tts_text, lo, hi)
                 if stream_on else [tts_text]

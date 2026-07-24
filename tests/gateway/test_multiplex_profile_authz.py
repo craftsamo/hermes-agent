@@ -1,5 +1,6 @@
 """Regression tests for multiplex profile-aware own-policy authorization."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -134,14 +135,14 @@ def test_secondary_open_policy_fails_startup_guard(monkeypatch):
     assert "open policy" in violation
 
 
-@pytest.mark.asyncio
-async def test_profile_handler_stamps_profile_scoped_tts_config(monkeypatch):
+def test_tts_config_snapshot_uses_routed_profile(monkeypatch):
     from gateway.platforms.base import MessageEvent
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
-    runner._resolve_profile_home_for_source = lambda _source: "/profiles/coder"
-    runner._handle_message = AsyncMock(return_value="ok")
+    runner._resolve_profile_home_for_source = lambda source: (
+        "/profiles/coder" if source.profile == "coder" else "/profiles/main"
+    )
     monkeypatch.setattr("gateway.run._profile_runtime_scope", lambda _home: nullcontext())
     monkeypatch.setattr(
         "tools.tts_tool._tts_streaming_cfg",
@@ -152,12 +153,10 @@ async def test_profile_handler_stamps_profile_scoped_tts_config(monkeypatch):
         source=SessionSource(
             platform=Platform.WECOM,
             chat_id="dm-chat",
-            profile=None,
+            profile="coder",
         ),
     )
 
-    result = await runner._make_profile_message_handler("coder")(event)
+    runner._stamp_tts_streaming_config(event)
 
-    assert result == "ok"
-    assert event.source.profile == "coder"
-    assert event._tts_streaming_cfg == (False, 120, 400, 0)
+    assert event.metadata["_tts_streaming_cfg"] == (False, 120, 400, 0)

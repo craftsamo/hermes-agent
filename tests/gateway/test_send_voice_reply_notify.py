@@ -105,10 +105,6 @@ async def test_voice_reply_notifies_first_successful_chunk(monkeypatch, tmp_path
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     _fake_tts_call(monkeypatch)
     monkeypatch.setattr(
-        "tools.tts_tool._tts_streaming_cfg",
-        lambda: (True, 1, 10, 0),
-    )
-    monkeypatch.setattr(
         "tools.tts_streaming.split_tts_text",
         lambda _text, _lo, _hi: ["one", "two", "three"],
     )
@@ -122,6 +118,7 @@ async def test_voice_reply_notifies_first_successful_chunk(monkeypatch, tmp_path
     )
     runner = _runner_with_adapter(send_voice)
     event = _make_event()
+    event.metadata["_tts_streaming_cfg"] = (True, 1, 10, 0)
 
     await runner._send_voice_reply(event, "A multi-part reply.")
 

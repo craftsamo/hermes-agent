@@ -5988,9 +5988,12 @@ class BasePlatformAdapter(ABC):
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
 
+                            _event_tts_config = (
+                                event.metadata.get("_tts_streaming_cfg")
+                                if isinstance(event.metadata, dict) else None
+                            )
                             _stream_on, _lo, _hi, _ = (
-                                getattr(event, "_tts_streaming_cfg", None)
-                                or _tts_streaming_cfg()
+                                _event_tts_config or _tts_streaming_cfg()
                             )
                             _chunks = (
                                 split_tts_text(speech_text, _lo, _hi)
