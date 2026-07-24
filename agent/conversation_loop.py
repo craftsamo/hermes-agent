@@ -1286,6 +1286,8 @@ class _LoopState:
     length_continue_retries: int = 0
     _outer_error_count: int = 0  # outer-loop exceptions this turn (#92450), see _MAX_OUTER_LOOP_ERRORS
     truncated_tool_call_retries: int = 0
+    anthropic_oauth_invoke_retries: int = 0
+    anthropic_oauth_invoke_recovery: bool = False
     truncated_response_parts: List[str] = field(default_factory=list)
     compression_attempts: int = 0
     _last_preflight_pressure: Optional[int] = None
@@ -1365,6 +1367,8 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
 
     Returns a turn result dict when a phase ends the turn, else None once the loop is left
     (success, a restart armed on ``s._retry``, interrupt, or retries exhausted)."""
+    from agent.anthropic_oauth_recovery import _MalformedAnthropicOAuthToolMarkup, handle_oauth_markup
+
     while s.retry_count < s.max_retries:
         _ng = _run_phase(nous_rate_limit_guard, agent, s)
         if _ng.action == "return":
@@ -1379,6 +1383,14 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
             if _rc.action == "return":
                 return _rc.result
             if _rc.action == "break":
+                s.anthropic_oauth_invoke_retries = 0
+                s.anthropic_oauth_invoke_recovery = False
+                return None
+        except _MalformedAnthropicOAuthToolMarkup as malformed:
+            verdict = _run_phase(handle_oauth_markup, agent, s, malformed=malformed)
+            if verdict.action == "return":
+                return verdict.result
+            if verdict.action == "break":
                 return None
         except InterruptedError:
             if _run_phase(handle_api_interrupt, agent, s).action == "break":

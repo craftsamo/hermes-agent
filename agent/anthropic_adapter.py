@@ -253,6 +253,68 @@ _MCP_TOOL_PREFIX = "mcp__"
 _OAUTH_TOOL_NAME_ALIASES = {"session_search": "chat_history_lookup", "memory": "context_notes"}
 _OAUTH_TOOL_NAME_REVERSE_ALIASES = {wire_name: name for name, wire_name in _OAUTH_TOOL_NAME_ALIASES.items()}
 
+_OAUTH_INVOKE_LINE_RE = re.compile(
+    r"^[ \t]*<invoke\b(?=[^>\r\n]*\bname\s*=\s*"
+    r"(?:\"mcp__[A-Za-z0-9_.:-]+\"|'mcp__[A-Za-z0-9_.:-]+'))[^>\r\n]*>",
+    re.IGNORECASE,
+)
+
+
+def _text_has_oauth_invoke_markup(text: Any) -> bool:
+    """Detect standalone OAuth invoke markup, not fenced examples."""
+    if not isinstance(text, str) or "<invoke" not in text.lower():
+        return False
+    fence: Optional[str] = None
+    for line in text.splitlines():
+        marker = line.lstrip()[:3]
+        if marker in {"```", "~~~"}:
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            continue
+        if fence is None and _OAUTH_INVOKE_LINE_RE.match(line):
+            return True
+    return False
+
+
+def _content_has_oauth_invoke_markup(content: Any) -> bool:
+    if isinstance(content, str):
+        return _text_has_oauth_invoke_markup(content)
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if isinstance(part, str) and _text_has_oauth_invoke_markup(part):
+            return True
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and _text_has_oauth_invoke_markup(part.get("text"))
+        ):
+            return True
+    return False
+
+
+def anthropic_oauth_message_has_invoke_markup(message: Any) -> bool:
+    """Inspect only assistant-text carriers, never tool inputs or user data."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    return any(_content_has_oauth_invoke_markup(message.get(key)) for key in (
+        "content", "api_content", "anthropic_content_blocks"
+    ))
+
+
+def anthropic_oauth_response_has_invoke_markup(response: Any) -> bool:
+    """Detect malformed OAuth tool markup in raw Anthropic text blocks."""
+    blocks = getattr(response, "content", None)
+    if not isinstance(blocks, list):
+        return False
+    return any(
+        getattr(block, "type", None) == "text"
+        and _text_has_oauth_invoke_markup(getattr(block, "text", None))
+        for block in blocks
+    )
+
 # Aliases ALSO safe to substitute in free-form prose (system prompt, tool descriptions). "memory"
 # is ordinary English throughout the prompt and inside the memory tool's own parameter docs (an
 # enum the model must emit verbatim), so rewriting it would corrupt guidance; a model that calls
@@ -530,6 +592,12 @@ def build_anthropic_kwargs(
     ``is_oauth`` applies Claude Code compatibility transforms; ``preserve_dots`` keeps model-name
     dots (DashScope: qwen3.5-plus); a third-party ``base_url`` strips thinking signatures;
     ``fast_mode`` adds ``extra_body.speed="fast"`` plus the fast-mode beta on native Anthropic only."""
+    if is_oauth:
+        original_count = len(messages)
+        messages = [message for message in messages if not anthropic_oauth_message_has_invoke_markup(message)]
+        if original_count != len(messages):
+            logger.warning("Dropped %d malformed Anthropic OAuth assistant message(s) from request replay",
+                           original_count - len(messages))
     system, anthropic_messages = convert_messages_to_anthropic(messages, base_url=base_url, model=model)
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
     # Nous Portal routes on its own catalog ids (``anthropic/claude-opus-4.8``); normalizing would

@@ -2974,6 +2974,16 @@ class _StreamingCall(StreamingWaitMonitor):
         per-request ``request_client`` so the watchdog can abort this socket
         without closing the shared client mid-flight."""
         has_tool_use = False
+        quarantine_oauth_deltas = bool(getattr(self.agent, "_is_anthropic_oauth", False))
+        pending_oauth_deltas = []
+        emitters = {"tool": self._emit_tool_started, "text": self._emit_text, "reasoning": self._emit_reasoning}
+
+        def _queue_or_deliver_anthropic_delta(kind, payload):
+            if quarantine_oauth_deltas:
+                pending_oauth_deltas.append((kind, payload))
+            else:
+                emitters[kind](payload)
+
         # Eventless stream: the SDK's get_final_message() raises AssertionError (no
         # message_start); shims may fabricate a contentless Message. All -> EmptyStreamError.
         saw_stream_event = False
@@ -3018,16 +3028,16 @@ class _StreamingCall(StreamingWaitMonitor):
                     if block and getattr(block, "type", None) == "tool_use":
                         has_tool_use = True
                         if getattr(block, "name", None):
-                            self._emit_tool_started(block.name)
+                            _queue_or_deliver_anthropic_delta("tool", block.name)
                 elif event_type == "content_block_delta":
                     delta = getattr(event, "delta", None)
                     delta_type = getattr(delta, "type", None) if delta else None
                     if delta_type == "text_delta":
                         text = getattr(delta, "text", "")
                         if text and not has_tool_use:
-                            self._emit_text(text)
+                            _queue_or_deliver_anthropic_delta("text", text)
                     elif delta_type == "thinking_delta" and getattr(delta, "thinking", ""):
-                        self._emit_reasoning(delta.thinking)
+                        _queue_or_deliver_anthropic_delta("reasoning", delta.thinking)
             raw_stream = _stream_context["stream"]
             if not self.agent._interrupt_requested and raw_stream is not None:
                 try:
@@ -3049,9 +3059,18 @@ class _StreamingCall(StreamingWaitMonitor):
             return None
         if base_final_message is not None:
             self._check_anthropic_message(base_final_message, tool_drop=False)
-            if not stream.output_modified:
-                return self._check_anthropic_message(base_final_message)
-        return self._check_anthropic_message(accumulator.response(base_final_message))
+        final_message = self._check_anthropic_message(
+            base_final_message if base_final_message is not None and not stream.output_modified
+            else accumulator.response(base_final_message)
+        )
+        if quarantine_oauth_deltas and self._writer_still_current("Anthropic streaming"):
+            from agent.anthropic_adapter import anthropic_oauth_response_has_invoke_markup
+            if not anthropic_oauth_response_has_invoke_markup(final_message):
+                for kind, payload in pending_oauth_deltas:
+                    if not self._writer_still_current("Anthropic streaming"):
+                        break
+                    emitters[kind](payload)
+        return final_message
 
     # ── retry loop ──────────────────────────────────────────────────────
 
