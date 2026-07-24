@@ -84,7 +84,7 @@ def take_speech_interrupted() -> bool:
 # Sentence boundary: after ASCII punctuation plus whitespace, after CJK
 # punctuation, or at a blank line.
 SENTENCE_BOUNDARY_RE = re.compile(
-    r"(?<=[.!?])(?:\s|\n)|(?<=[。．！？…])|(?:\n\n)"
+    r"(?<=[.!?])(?:\s|\n)|[。．！？…]|(?:\n\n)"
 )
 _THINK_BLOCK_RE = re.compile(r"<think[\s>].*?</think>", flags=re.DOTALL)
 _SOFT_BREAK_CHARS = "、，,;:　 \t"

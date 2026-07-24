@@ -52,6 +52,7 @@ class TestSentenceChunker:
 
         assert chunks[:2] == ["最初です。", "次です！"]
         assert all(len(chunk) <= 10 for chunk in chunks)
+        assert ts.split_tts_text("はい。次の説明です。") == ["はい。次の説明です。"]
 
 
 # ── Interruption latch ───────────────────────────────────────────────────
