@@ -87,7 +87,7 @@ def perform_api_call(
                 _MalformedAnthropicOAuthToolMarkup, _snapshot_anthropic_oauth_usage,
             )
             if anthropic_oauth_response_has_invoke_markup(result):
-                return _MalformedAnthropicOAuthToolMarkup(_snapshot_anthropic_oauth_usage(agent, result))
+                raise _MalformedAnthropicOAuthToolMarkup(_snapshot_anthropic_oauth_usage(agent, result))
         return result
 
     def _send_api_call(next_api_kwargs):
@@ -141,9 +141,6 @@ def perform_api_call(
             provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
             api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
         )
-        from agent.anthropic_oauth_recovery import _MalformedAnthropicOAuthToolMarkup
-        if isinstance(response, _MalformedAnthropicOAuthToolMarkup):
-            raise response
     finally:
         with _bracket:
             if _model_request_active is not None:

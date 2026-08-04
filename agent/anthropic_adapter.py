@@ -278,6 +278,11 @@ def _text_has_oauth_invoke_markup(text: Any) -> bool:
     return False
 
 
+def anthropic_oauth_text_has_invoke_markup(text: Any) -> bool:
+    """Public stream-safe wrapper for the narrow line-level detector."""
+    return _text_has_oauth_invoke_markup(text)
+
+
 def _content_has_oauth_invoke_markup(content: Any) -> bool:
     if isinstance(content, str):
         return _text_has_oauth_invoke_markup(content)
@@ -299,6 +304,10 @@ def anthropic_oauth_message_has_invoke_markup(message: Any) -> bool:
     """Inspect only assistant-text carriers, never tool inputs or user data."""
     if not isinstance(message, dict) or message.get("role") != "assistant":
         return False
+    if message.get("finish_reason") not in {"tool_calls", "tool_use"}:
+        return False
+    if message.get("tool_calls"):
+        return False
     return any(_content_has_oauth_invoke_markup(message.get(key)) for key in (
         "content", "api_content", "anthropic_content_blocks"
     ))
@@ -306,8 +315,12 @@ def anthropic_oauth_message_has_invoke_markup(message: Any) -> bool:
 
 def anthropic_oauth_response_has_invoke_markup(response: Any) -> bool:
     """Detect malformed OAuth tool markup in raw Anthropic text blocks."""
+    if getattr(response, "stop_reason", None) != "tool_use":
+        return False
     blocks = getattr(response, "content", None)
     if not isinstance(blocks, list):
+        return False
+    if any(getattr(block, "type", None) == "tool_use" for block in blocks):
         return False
     return any(
         getattr(block, "type", None) == "text"

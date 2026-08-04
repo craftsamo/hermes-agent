@@ -261,9 +261,14 @@ def test_execution_middleware_never_observes_raw_malformed_response(oauth_agent)
         return next(responses)
 
     def _middleware(payload, executor, **_kwargs):
-        result = executor(payload)
-        observed.append(result)
-        return result
+        try:
+            result = executor(payload)
+        except Exception as exc:
+            observed.append(exc)
+            raise
+        else:
+            observed.append(result)
+            return result
 
     with (
         patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
@@ -302,7 +307,7 @@ def _stream(events, final_message):
     return stream
 
 
-def test_oauth_stream_releases_text_only_after_final_validation(
+def test_oauth_stream_releases_normal_text_before_final_validation(
     oauth_agent, monkeypatch
 ):
     monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
@@ -321,7 +326,7 @@ def test_oauth_stream_releases_text_only_after_final_validation(
     )
 
     def _final_message():
-        assert received == []
+        assert received == ["Hello"]
         return final_message
 
     stream.get_final_message.side_effect = _final_message
@@ -370,7 +375,7 @@ def test_oauth_stream_discards_all_deltas_when_final_response_is_malformed(
     result = oauth_agent._interruptible_streaming_api_call({})
 
     assert result is final_message
-    assert received == []
+    assert received == ["court\n"]
 
 
 def test_oauth_stream_discards_quarantine_when_writer_changes_before_release(
@@ -383,6 +388,13 @@ def test_oauth_stream_discards_quarantine_when_writer_changes_before_release(
     final_message = _tool_response()
     stream = _stream(
         [
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(
+                    type="text_delta",
+                    text='<invoke name="mcp__web_search">',
+                ),
+            ),
             SimpleNamespace(
                 type="content_block_start",
                 content_block=SimpleNamespace(

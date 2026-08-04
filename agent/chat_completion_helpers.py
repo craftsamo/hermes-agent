@@ -2975,14 +2975,42 @@ class _StreamingCall(StreamingWaitMonitor):
         without closing the shared client mid-flight."""
         has_tool_use = False
         quarantine_oauth_deltas = bool(getattr(self.agent, "_is_anthropic_oauth", False))
+        oauth_line_buffer = ""
+        oauth_quarantine_active = False
         pending_oauth_deltas = []
         emitters = {"tool": self._emit_tool_started, "text": self._emit_text, "reasoning": self._emit_reasoning}
 
         def _queue_or_deliver_anthropic_delta(kind, payload):
-            if quarantine_oauth_deltas:
-                pending_oauth_deltas.append((kind, payload))
-            else:
+            nonlocal oauth_line_buffer, oauth_quarantine_active
+            if not quarantine_oauth_deltas:
                 emitters[kind](payload)
+                return
+            if oauth_quarantine_active:
+                pending_oauth_deltas.append((kind, payload))
+                return
+            if kind != "text":
+                emitters[kind](payload)
+                return
+            from agent.anthropic_adapter import anthropic_oauth_text_has_invoke_markup
+            oauth_line_buffer += payload
+            while "\n" in oauth_line_buffer:
+                line, oauth_line_buffer = oauth_line_buffer.split("\n", 1)
+                line += "\n"
+                if anthropic_oauth_text_has_invoke_markup(line):
+                    oauth_quarantine_active = True
+                    pending_oauth_deltas.append(("text", line + oauth_line_buffer))
+                    oauth_line_buffer = ""
+                    return
+                emitters["text"](line)
+            stripped = oauth_line_buffer.lstrip().lower()
+            marker = "<invoke"
+            if anthropic_oauth_text_has_invoke_markup(oauth_line_buffer):
+                oauth_quarantine_active = True
+                pending_oauth_deltas.append(("text", oauth_line_buffer))
+                oauth_line_buffer = ""
+            elif stripped and not (marker.startswith(stripped) or stripped.startswith(marker)):
+                emitters["text"](oauth_line_buffer)
+                oauth_line_buffer = ""
 
         # Eventless stream: the SDK's get_final_message() raises AssertionError (no
         # message_start); shims may fabricate a contentless Message. All -> EmptyStreamError.
@@ -3063,7 +3091,12 @@ class _StreamingCall(StreamingWaitMonitor):
             base_final_message if base_final_message is not None and not stream.output_modified
             else accumulator.response(base_final_message)
         )
-        if quarantine_oauth_deltas and self._writer_still_current("Anthropic streaming"):
+        if quarantine_oauth_deltas and oauth_line_buffer:
+            _queue_or_deliver_anthropic_delta("text", "")
+            if oauth_line_buffer:
+                self._emit_text(oauth_line_buffer)
+                oauth_line_buffer = ""
+        if oauth_quarantine_active and self._writer_still_current("Anthropic streaming"):
             from agent.anthropic_adapter import anthropic_oauth_response_has_invoke_markup
             if not anthropic_oauth_response_has_invoke_markup(final_message):
                 for kind, payload in pending_oauth_deltas:
