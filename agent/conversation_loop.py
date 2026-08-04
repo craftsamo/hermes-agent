@@ -1084,6 +1084,7 @@ def _peel_moa_guidance(messages: List[Dict[str, Any]], guidance: Any) -> List[Di
 def _redecorate_prompt_cache_for_provider(
     agent, api_messages: List[Dict[str, Any]], *, system_message=None,
     moa_prepared: Optional[Dict[str, Any]] = None, tools_for_api: Optional[List[Dict[str, Any]]] = None,
+    anthropic_oauth_replay_entries: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]] | tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Strip and re-apply cache_control for the *current* provider policy — failover
     ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased."""
@@ -1094,6 +1095,8 @@ def _redecorate_prompt_cache_for_provider(
         messages = _peel_moa_guidance(messages, guidance)
 
     strip_anthropic_cache_control(messages)
+    from agent.anthropic_oauth_replay import _sanitize_anthropic_oauth_replay_for_provider
+    messages = _sanitize_anthropic_oauth_replay_for_provider(agent, messages, anthropic_oauth_replay_entries or {})
     planned_tools = strip_anthropic_tool_cache_control(
         tools_for_api if tools_for_api is not None else getattr(agent, "tools", [])
     )
@@ -1307,6 +1310,8 @@ class _LoopState:
     pending_moa_prepared_request: Any = None
     # Per-iteration slots.
     request_logger: Any = None
+    _oauth_replay_targets: Any = None
+    _oauth_replay_entries: Any = None
     api_messages: Any = None
     tools_for_api: Any = None
     _moa_prepared_request: Any = None

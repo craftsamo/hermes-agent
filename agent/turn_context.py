@@ -948,6 +948,7 @@ def _sanitize_model_for(agent: Any, moa_config: Any) -> Any:
 def build_api_messages(
     agent: Any, messages: List[Dict[str, Any]], *, current_turn_user_idx: Any,
     ext_prefetch_cache: Any, plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
+    oauth_replay_targets=None, oauth_replay_entries=None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Build the wire copy of ``messages`` for one API call plus the effective system
     message. Returns ``(api_messages, effective_system)``.
@@ -963,18 +964,16 @@ def build_api_messages(
     from agent.conversation_loop import _clone_message_for_send
 
     api_messages = []
-    _oauth_invoke_message_detector = None
-    if agent.api_mode == "anthropic_messages" and agent._is_anthropic_oauth:
-        from agent.anthropic_adapter import anthropic_oauth_message_has_invoke_markup
-        _oauth_invoke_message_detector = anthropic_oauth_message_has_invoke_markup
-    _dropped_anthropic_oauth_messages = 0
+    from agent.anthropic_oauth_replay import _ANTHROPIC_OAUTH_REPLAY_MARKER
     for idx, msg in enumerate(messages):
-        if _oauth_invoke_message_detector and _oauth_invoke_message_detector(msg):
-            _dropped_anthropic_oauth_messages += 1
-            continue
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
+        payloads = (oauth_replay_targets or {}).get(id(msg))
+        if payloads and oauth_replay_entries is not None:
+            marker = len(oauth_replay_entries)
+            api_msg[_ANTHROPIC_OAUTH_REPLAY_MARKER] = marker
+            oauth_replay_entries[marker] = {"payloads": tuple(sorted(payloads)), "original": None}
         # api_content is bookkeeping (exact bytes sent), never a provider field — pop
         # it from EVERY outgoing copy. display_* is display-only timeline metadata
         # (strict OpenAI backends reject unknown keys); _row_id is the durable row id
@@ -1030,10 +1029,6 @@ def build_api_messages(
         # 'reasoning_details' is kept: OpenRouter uses it for multi-turn reasoning
         # continuity.
         api_messages.append(api_msg)
-
-    if _dropped_anthropic_oauth_messages:
-        logger.warning("Dropped %d malformed Anthropic OAuth assistant message(s) from request replay",
-                       _dropped_anthropic_oauth_messages)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the

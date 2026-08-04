@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 from agent.anthropic_adapter import (
     anthropic_oauth_message_has_invoke_markup,
+    anthropic_oauth_message_invoke_payloads,
     anthropic_oauth_response_has_invoke_markup,
     build_anthropic_kwargs,
+    remove_anthropic_oauth_invoke_payloads,
 )
 
 
@@ -49,6 +51,22 @@ def test_detects_incomplete_oauth_invoke_tail():
     )
 
     assert anthropic_oauth_response_has_invoke_markup(response) is True
+
+
+def test_single_line_invoke_payload_preserves_following_text():
+    content = '<invoke name="mcp__kanban_create"></invoke>\nNormal explanation'
+    message = {
+        "role": "assistant",
+        "content": content,
+        "finish_reason": "tool_calls",
+    }
+
+    payloads = anthropic_oauth_message_invoke_payloads(message)
+    cleaned = remove_anthropic_oauth_invoke_payloads(message, set(payloads))
+
+    assert payloads == ('<invoke name="mcp__kanban_create"></invoke>',)
+    assert cleaned is not None
+    assert cleaned["content"] == "Normal explanation"
 
 
 def test_preserves_end_turn_examples_and_structured_tool_use():

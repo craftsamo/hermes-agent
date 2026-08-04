@@ -94,9 +94,9 @@ def _openai_text_response(text):
 @pytest.fixture()
 def oauth_agent():
     with (
-        patch("run_agent.get_tool_definitions", return_value=_tool_defs()),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("model_tools.get_tool_definitions", return_value=_tool_defs()),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
     ):
         agent = AIAgent(
             api_key="test",
@@ -141,7 +141,7 @@ def test_malformed_response_retries_as_required_without_thinking(oauth_agent):
 
     with (
         patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
-        patch("run_agent.handle_function_call", return_value="search result") as tool,
+        patch("model_tools.handle_function_call", return_value="search result") as tool,
         patch.object(oauth_agent, "_persist_session"),
         patch.object(oauth_agent, "_save_trajectory"),
         patch.object(oauth_agent, "_cleanup_task_resources"),
@@ -197,6 +197,320 @@ def test_resume_drops_malformed_assistant_before_request_shaping(oauth_agent):
     assert "continue" in repr(requests[0]["messages"])
 
 
+def test_context_engine_replacement_reattaches_replay_provenance(oauth_agent):
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return _text_response("Done")
+
+    def _replace_request(request_messages, **_kwargs):
+        return [
+            {
+                key: value
+                for key, value in message.items()
+                if key != "_anthropic_oauth_replay_payloads"
+            }
+            for message in request_messages
+        ]
+
+    oauth_agent.context_compressor.select_context = _replace_request
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation(
+            "continue",
+            conversation_history=[
+                {"role": "user", "content": "make a task"},
+                {
+                    "role": "assistant",
+                    "content": MALFORMED,
+                    "finish_reason": "tool_calls",
+                },
+            ],
+        )
+
+    assert result["completed"] is True
+    assert "<invoke" not in repr(requests[0]["messages"])
+
+
+def test_context_engine_replay_normalizes_surrogate_payloads(oauth_agent):
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return _text_response("Done")
+
+    def _replace_request(request_messages, **_kwargs):
+        return [
+            {
+                key: value
+                for key, value in message.items()
+                if key != "_anthropic_oauth_replay_payloads"
+            }
+            for message in request_messages
+        ]
+
+    oauth_agent.context_compressor.select_context = _replace_request
+    malformed = MALFORMED.replace("test", "bad\ud800query")
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation(
+            "continue",
+            conversation_history=[
+                {"role": "user", "content": "make a task"},
+                {
+                    "role": "assistant",
+                    "content": malformed,
+                    "finish_reason": "tool_calls",
+                },
+            ],
+        )
+
+    wire = repr(requests[0]["messages"])
+    assert result["completed"] is True
+    assert "<invoke" not in wire
+    assert "\\ud800" not in wire
+
+
+def test_replay_adds_text_when_invoke_removal_leaves_only_reasoning(oauth_agent):
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return _text_response("Done")
+
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation(
+            "continue",
+            conversation_history=[
+                {"role": "user", "content": "make a task"},
+                {
+                    "role": "assistant",
+                    "content": '<invoke name="mcp__web_search"></invoke>',
+                    "finish_reason": "tool_calls",
+                    "reasoning_details": [
+                        {"type": "reasoning", "text": "signed thought"}
+                    ],
+                },
+            ],
+        )
+
+    wire = repr(requests[0]["messages"])
+    assert result["completed"] is True
+    assert "<invoke" not in wire
+    assert "Malformed OAuth tool markup omitted" in wire
+
+
+def test_resume_preserves_assistant_merged_after_malformed_turn(oauth_agent):
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return _text_response("Done")
+
+    history = [
+        {"role": "user", "content": "make a task"},
+        {
+            "role": "assistant",
+            "content": MALFORMED,
+            "finish_reason": "tool_calls",
+        },
+        {
+            "role": "assistant",
+            "content": "Preserve this assistant context.",
+            "tool_calls": [
+                {
+                    "id": "call_keep",
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "arguments": '{"query":"kept"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_keep",
+            "name": "web_search",
+            "content": "kept result",
+        },
+    ]
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation(
+            "continue", conversation_history=history
+        )
+
+    wire = repr(requests[0]["messages"])
+    assert result["completed"] is True
+    assert "<invoke" not in wire
+    assert "Preserve this assistant context." in wire
+    assert "call_keep" in wire
+
+
+def test_fallback_redecoration_sanitizes_for_current_oauth_destination(oauth_agent):
+    from agent.agent_runtime_helpers import repair_message_sequence
+    from agent.anthropic_adapter import anthropic_oauth_message_invoke_payloads
+    from agent.anthropic_oauth_replay import _ANTHROPIC_OAUTH_REPLAY_MARKER
+    from agent.conversation_loop import _redecorate_prompt_cache_for_provider
+
+    malformed_with_whitespace = f"  {MALFORMED}\n"
+    messages = [
+        {"role": "user", "content": "make a task"},
+        {
+            "role": "assistant",
+            "content": malformed_with_whitespace,
+            "finish_reason": "tool_calls",
+        },
+        {"role": "assistant", "content": "Preserve this context."},
+        {"role": "user", "content": "continue"},
+    ]
+    payloads = anthropic_oauth_message_invoke_payloads(messages[1])
+    repair_message_sequence(oauth_agent, messages)
+    messages[1][_ANTHROPIC_OAUTH_REPLAY_MARKER] = 0
+    entries = {
+        0: {
+            "payloads": payloads,
+            "original": {"content": messages[1]["content"]},
+        }
+    }
+
+    oauth_agent.api_mode = "chat_completions"
+    oauth_agent.provider = "openrouter"
+    oauth_agent._is_anthropic_oauth = False
+    primary, _, _ = _redecorate_prompt_cache_for_provider(
+        oauth_agent,
+        messages,
+        tools_for_api=[],
+        anthropic_oauth_replay_entries=entries,
+    )
+    assert "<invoke" in repr(primary)
+
+    oauth_agent.api_mode = "anthropic_messages"
+    oauth_agent.provider = "anthropic"
+    oauth_agent._is_anthropic_oauth = True
+    fallback, _, _ = _redecorate_prompt_cache_for_provider(
+        oauth_agent,
+        messages,
+        tools_for_api=[],
+        anthropic_oauth_replay_entries=entries,
+    )
+
+    wire = repr(fallback)
+    assert "<invoke" not in wire
+    assert "Preserve this context." in wire
+
+    oauth_agent.api_mode = "chat_completions"
+    oauth_agent.provider = "openrouter"
+    oauth_agent._is_anthropic_oauth = False
+    restored, _, _ = _redecorate_prompt_cache_for_provider(
+        oauth_agent,
+        fallback,
+        tools_for_api=[],
+        anthropic_oauth_replay_entries=entries,
+    )
+    assert "<invoke" in repr(restored)
+
+
+def test_oauth_redecoration_preserves_unrelated_assistant_blocks(oauth_agent):
+    from agent.anthropic_adapter import anthropic_oauth_message_invoke_payloads
+    from agent.anthropic_oauth_replay import _ANTHROPIC_OAUTH_REPLAY_MARKER
+    from agent.conversation_loop import _redecorate_prompt_cache_for_provider
+
+    candidate = {
+        "role": "assistant",
+        "content": MALFORMED,
+        "finish_reason": "tool_calls",
+    }
+    payloads = anthropic_oauth_message_invoke_payloads(candidate)
+    unrelated_blocks = [{"type": "text", "text": " leading text "}]
+    messages = [
+        {"role": "user", "content": "make a task"},
+        {
+            "role": "assistant",
+            "content": MALFORMED,
+            _ANTHROPIC_OAUTH_REPLAY_MARKER: 0,
+        },
+        {"role": "user", "content": "another question"},
+        {
+            "role": "assistant",
+            "content": " leading text ",
+            "anthropic_content_blocks": unrelated_blocks,
+        },
+    ]
+
+    sanitized, _, _ = _redecorate_prompt_cache_for_provider(
+        oauth_agent,
+        messages,
+        tools_for_api=[],
+        anthropic_oauth_replay_entries={
+            0: {
+                "payloads": payloads,
+                "original": {"content": MALFORMED},
+            }
+        },
+    )
+
+    preserved = next(
+        message
+        for message in sanitized
+        if message.get("anthropic_content_blocks") == unrelated_blocks
+    )
+    assert preserved["content"] == " leading text "
+    assert preserved["anthropic_content_blocks"] == unrelated_blocks
+
+
+def test_non_oauth_request_keeps_content_without_internal_marker(oauth_agent):
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return _openai_text_response("Done")
+
+    oauth_agent.api_mode = "chat_completions"
+    oauth_agent.provider = "openrouter"
+    oauth_agent._is_anthropic_oauth = False
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation(
+            "continue",
+            conversation_history=[
+                {"role": "user", "content": "make a task"},
+                {
+                    "role": "assistant",
+                    "content": MALFORMED,
+                    "finish_reason": "tool_calls",
+                },
+            ],
+        )
+
+    assert result["completed"] is True
+    assert "<invoke" in repr(requests[0]["messages"])
+    assert "_anthropic_oauth_replay_payloads" not in repr(requests[0]["messages"])
+
+
 def test_recovery_exhaustion_fails_without_persisting_markup(oauth_agent):
     malformed = _text_response(MALFORMED, stop_reason="tool_use")
     requests = []
@@ -207,7 +521,7 @@ def test_recovery_exhaustion_fails_without_persisting_markup(oauth_agent):
 
     with (
         patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
-        patch("run_agent.handle_function_call") as tool,
+        patch("model_tools.handle_function_call") as tool,
         patch.object(oauth_agent, "_persist_session"),
         patch.object(oauth_agent, "_save_trajectory"),
         patch.object(oauth_agent, "_cleanup_task_resources"),
@@ -308,7 +622,7 @@ def test_execution_middleware_never_observes_raw_malformed_response(oauth_agent)
             "hermes_cli.middleware.run_llm_execution_middleware",
             side_effect=_middleware,
         ),
-        patch("run_agent.handle_function_call", return_value="search result"),
+        patch("model_tools.handle_function_call", return_value="search result"),
         patch.object(oauth_agent, "_persist_session"),
         patch.object(oauth_agent, "_save_trajectory"),
         patch.object(oauth_agent, "_cleanup_task_resources"),

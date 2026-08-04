@@ -96,6 +96,7 @@ def build_api_request(
     system_message: Any, messages: Any, original_user_message: Any, approx_tokens: Any,
     total_chars: Any, retry_count: Any, api_call_count: Any, api_request_id: Any,
     api_start_time: Any, effective_task_id: Any, turn_id: Any, anthropic_oauth_invoke_recovery: bool = False,
+    _oauth_replay_entries: Any = None,
 ) -> ApiRequestBuild:
     """Assemble the attempt's request in the original order (every mutation happens BEFORE
     middleware/hooks/debug dumps observe the payload)."""
@@ -114,12 +115,18 @@ def build_api_request(
         _redecorate_prompt_cache_for_provider(
             agent, api_messages, system_message=system_message, moa_prepared=_moa_prepared_request,
             tools_for_api=tools_for_api,
+            anthropic_oauth_replay_entries=_oauth_replay_entries,
         )
     )
+    from agent.anthropic_oauth_replay import _ANTHROPIC_OAUTH_REPLAY_MARKER
+    request_api_messages = [
+        {key: value for key, value in message.items() if key != _ANTHROPIC_OAUTH_REPLAY_MARKER}
+        if isinstance(message, dict) else message for message in api_messages
+    ]
     if tools_for_api == agent.tools:
-        api_kwargs = agent._build_api_kwargs(api_messages)
+        api_kwargs = agent._build_api_kwargs(request_api_messages)
     else:
-        api_kwargs = agent._build_api_kwargs(api_messages, tools_for_api=tools_for_api)
+        api_kwargs = agent._build_api_kwargs(request_api_messages, tools_for_api=tools_for_api)
     if (anthropic_oauth_invoke_recovery and agent.api_mode == "anthropic_messages"
             and agent._is_anthropic_oauth and api_kwargs.get("tools")):
         api_kwargs["tool_choice"] = {"type": "any"}

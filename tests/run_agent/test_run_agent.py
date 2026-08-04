@@ -4477,6 +4477,38 @@ class TestRunConversation:
         assert result["final_response"] == "Part 1 Part 2"
         assert requested_caps == [65536, 65536]
 
+    def test_api_kwargs_surrogates_scrubbed_after_build(self, agent):
+        """The complete request body is sanitized before transport dispatch."""
+        self._setup_agent(agent)
+        dirty = "request metadata \ud83d"
+
+        def _fake_build_api_kwargs(api_messages, **_kwargs):
+            return {
+                "model": agent.model,
+                "messages": api_messages,
+                "extra_body": {"note": dirty},
+            }
+
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Done",
+            finish_reason="stop",
+        )
+        with (
+            patch.object(
+                agent,
+                "_build_api_kwargs",
+                side_effect=_fake_build_api_kwargs,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        sent = agent.client.chat.completions.create.call_args.kwargs
+        assert result["completed"] is True
+        assert sent["extra_body"]["note"] == "request metadata \ufffd"
+
     def test_ollama_glm_stop_after_tools_without_terminal_boundary_requests_continuation(self, agent):
         """Local Ollama-hosted GLM (no :cloud suffix) misreports truncated output as stop."""
         self._setup_agent(agent)
