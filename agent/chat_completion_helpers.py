@@ -2976,12 +2976,13 @@ class _StreamingCall(StreamingWaitMonitor):
         has_tool_use = False
         quarantine_oauth_deltas = bool(getattr(self.agent, "_is_anthropic_oauth", False))
         oauth_line_buffer = ""
+        oauth_fence_marker = None
         oauth_quarantine_active = False
         pending_oauth_deltas = []
         emitters = {"tool": self._emit_tool_started, "text": self._emit_text, "reasoning": self._emit_reasoning}
 
         def _queue_or_deliver_anthropic_delta(kind, payload):
-            nonlocal oauth_line_buffer, oauth_quarantine_active
+            nonlocal oauth_fence_marker, oauth_line_buffer, oauth_quarantine_active
             if not quarantine_oauth_deltas:
                 emitters[kind](payload)
                 return
@@ -2996,15 +2997,41 @@ class _StreamingCall(StreamingWaitMonitor):
             while "\n" in oauth_line_buffer:
                 line, oauth_line_buffer = oauth_line_buffer.split("\n", 1)
                 line += "\n"
-                if anthropic_oauth_text_has_invoke_markup(line):
+                line_marker = line.lstrip()[:3]
+                if line_marker in {"```", "~~~"}:
+                    if oauth_fence_marker is None:
+                        oauth_fence_marker = line_marker
+                    elif oauth_fence_marker == line_marker:
+                        oauth_fence_marker = None
+                    emitters["text"](line)
+                elif oauth_fence_marker is None and anthropic_oauth_text_has_invoke_markup(line):
                     oauth_quarantine_active = True
                     pending_oauth_deltas.append(("text", line + oauth_line_buffer))
                     oauth_line_buffer = ""
                     return
-                emitters["text"](line)
+                else:
+                    emitters["text"](line)
             stripped = oauth_line_buffer.lstrip().lower()
             marker = "<invoke"
-            if anthropic_oauth_text_has_invoke_markup(oauth_line_buffer):
+            fence_prefix = oauth_fence_marker or ""
+            if oauth_fence_marker and stripped.startswith(oauth_fence_marker):
+                oauth_fence_marker = None
+                emitters["text"](oauth_line_buffer)
+                oauth_line_buffer = ""
+            elif oauth_fence_marker and stripped and not fence_prefix.startswith(stripped):
+                emitters["text"](oauth_line_buffer)
+                oauth_line_buffer = ""
+            elif oauth_fence_marker:
+                pass
+            elif stripped and any(
+                candidate.startswith(stripped) or stripped.startswith(candidate)
+                for candidate in ("```", "~~~")
+            ):
+                if len(stripped) >= 3:
+                    oauth_fence_marker = stripped[:3]
+                    emitters["text"](oauth_line_buffer)
+                    oauth_line_buffer = ""
+            elif anthropic_oauth_text_has_invoke_markup(oauth_line_buffer):
                 oauth_quarantine_active = True
                 pending_oauth_deltas.append(("text", oauth_line_buffer))
                 oauth_line_buffer = ""

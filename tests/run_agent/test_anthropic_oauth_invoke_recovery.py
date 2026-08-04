@@ -374,6 +374,67 @@ def test_oauth_stream_releases_normal_text_before_final_validation(
     assert received == ["Hello"]
 
 
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_oauth_stream_preserves_fenced_invoke_examples_across_deltas(
+    oauth_agent, monkeypatch, fence
+):
+    monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+    oauth_agent._disable_streaming = False
+    received = []
+    oauth_agent._fire_stream_delta = received.append
+    text = f'{fence}xml\n<invoke name="mcp__web_search">\n{fence}\n'
+    final_message = _text_response(text)
+    stream = _stream(
+        [
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text=fence[:1]),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(
+                    type="text_delta", text=fence[1:] + "xml\n"
+                ),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text="<inv"),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(
+                    type="text_delta", text='oke name="mcp__web_search">\n'
+                ),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text=fence[:2]),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text=fence[2:] + "\n"),
+            ),
+        ],
+        final_message,
+    )
+
+    def _final_message():
+        assert "".join(received) == text
+        return final_message
+
+    stream.get_final_message.side_effect = _final_message
+    oauth_agent._anthropic_client = MagicMock()
+    oauth_agent._anthropic_client.messages.stream.return_value = stream
+    oauth_agent._create_request_anthropic_client = (
+        lambda *args, **kwargs: oauth_agent._anthropic_client
+    )
+
+    result = oauth_agent._interruptible_streaming_api_call({})
+
+    assert result is final_message
+    assert "".join(received) == text
+
+
 def test_oauth_stream_discards_all_deltas_when_final_response_is_malformed(
     oauth_agent, monkeypatch
 ):
