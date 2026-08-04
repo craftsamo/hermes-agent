@@ -165,6 +165,38 @@ def test_malformed_response_retries_as_required_without_thinking(oauth_agent):
     assert oauth_agent.session_output_tokens == 60
 
 
+def test_resume_drops_malformed_assistant_before_request_shaping(oauth_agent):
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return _text_response("Done")
+
+    history = [
+        {"role": "user", "content": "make a task"},
+        {
+            "role": "assistant",
+            "content": MALFORMED,
+            "finish_reason": "tool_calls",
+        },
+    ]
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation(
+            "continue", conversation_history=history
+        )
+
+    assert result["completed"] is True
+    assert len(requests) == 1
+    assert "<invoke" not in repr(requests[0]["messages"])
+    assert "make a task" in repr(requests[0]["messages"])
+    assert "continue" in repr(requests[0]["messages"])
+
+
 def test_recovery_exhaustion_fails_without_persisting_markup(oauth_agent):
     malformed = _text_response(MALFORMED, stop_reason="tool_use")
     requests = []

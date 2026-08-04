@@ -605,12 +605,6 @@ def build_anthropic_kwargs(
     ``is_oauth`` applies Claude Code compatibility transforms; ``preserve_dots`` keeps model-name
     dots (DashScope: qwen3.5-plus); a third-party ``base_url`` strips thinking signatures;
     ``fast_mode`` adds ``extra_body.speed="fast"`` plus the fast-mode beta on native Anthropic only."""
-    if is_oauth:
-        original_count = len(messages)
-        messages = [message for message in messages if not anthropic_oauth_message_has_invoke_markup(message)]
-        if original_count != len(messages):
-            logger.warning("Dropped %d malformed Anthropic OAuth assistant message(s) from request replay",
-                           original_count - len(messages))
     system, anthropic_messages = convert_messages_to_anthropic(messages, base_url=base_url, model=model)
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
     # Nous Portal routes on its own catalog ids (``anthropic/claude-opus-4.8``); normalizing would

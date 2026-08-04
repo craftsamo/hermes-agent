@@ -963,7 +963,15 @@ def build_api_messages(
     from agent.conversation_loop import _clone_message_for_send
 
     api_messages = []
+    _oauth_invoke_message_detector = None
+    if agent.api_mode == "anthropic_messages" and agent._is_anthropic_oauth:
+        from agent.anthropic_adapter import anthropic_oauth_message_has_invoke_markup
+        _oauth_invoke_message_detector = anthropic_oauth_message_has_invoke_markup
+    _dropped_anthropic_oauth_messages = 0
     for idx, msg in enumerate(messages):
+        if _oauth_invoke_message_detector and _oauth_invoke_message_detector(msg):
+            _dropped_anthropic_oauth_messages += 1
+            continue
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
@@ -1022,6 +1030,10 @@ def build_api_messages(
         # 'reasoning_details' is kept: OpenRouter uses it for multi-turn reasoning
         # continuity.
         api_messages.append(api_msg)
+
+    if _dropped_anthropic_oauth_messages:
+        logger.warning("Dropped %d malformed Anthropic OAuth assistant message(s) from request replay",
+                       _dropped_anthropic_oauth_messages)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the

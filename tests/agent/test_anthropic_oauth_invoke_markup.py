@@ -127,30 +127,6 @@ def test_inspects_all_assistant_replay_carriers_but_not_user_content():
     )
 
 
-def test_oauth_replay_drops_malformed_assistant_and_keeps_user_message():
-    kwargs = build_anthropic_kwargs(
-        model="claude-sonnet-4-6",
-        messages=[
-            {"role": "user", "content": "make a task"},
-            {
-                "role": "assistant",
-                "content": MALFORMED,
-                "finish_reason": "tool_calls",
-            },
-            {"role": "user", "content": "continue"},
-        ],
-        tools=[_tool()],
-        max_tokens=4096,
-        reasoning_config=None,
-        is_oauth=True,
-    )
-
-    wire_text = repr(kwargs["messages"])
-    assert "<invoke" not in wire_text
-    assert "make a task" in wire_text
-    assert "continue" in wire_text
-
-
 def test_non_oauth_replay_is_unchanged():
     kwargs = build_anthropic_kwargs(
         model="claude-sonnet-4-6",
