@@ -2852,12 +2852,14 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
 
 
 def _parse_session_key(session_key: str) -> "dict | None":
-    """Parse a session key (``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``).
+    """Parse ``agent:{namespace}:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
+    The ``main`` namespace maps to the default profile; named profiles keep their namespace.
     For group/channel sessions the suffix may be a user_id, not a thread_id, so ``thread_id`` is omitted.
     """
     parts = session_key.split(":")
-    if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
-        result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
+    if len(parts) >= 5 and parts[0] == "agent" and parts[1]:
+        result = {"profile": "default" if parts[1] == "main" else parts[1],
+                  "platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
         if len(parts) > 5 and parts[3] in {"dm", "thread"}:
             result["thread_id"] = parts[5]
         return result

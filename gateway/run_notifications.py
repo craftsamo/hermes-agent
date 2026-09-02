@@ -811,8 +811,10 @@ class GatewayNotificationsMixin:
                 "the connector's tenant guard (user_id fallback only).", platform_name, chat_id, chat_type,
             )
         return SessionSource(
-            platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=_opt("thread_id"),
+            platform=platform, chat_id=chat_id, chat_type=chat_type,
+            thread_id=_opt("thread_id") or derived.get("thread_id") or None,
             user_id=_opt("user_id"), user_name=_opt("user_name"), scope_id=scope_id,
+            profile=_opt("profile") or (derived.get("profile") if derived.get("profile") != "default" else None),
         )
 
     async def _drain_watch_notifications(self, completion_queue) -> None:
@@ -909,7 +911,24 @@ class GatewayNotificationsMixin:
             )
             return None
         platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-        adapter = self._resolve_injection_adapter(platform_name)
+        profile = (getattr(source, "profile", None) or "").strip() or None
+        if not profile:
+            parsed = _parse_session_key(str(evt.get("session_key") or "")) or {}
+            namespace = parsed.get("profile")
+            if namespace and namespace != "default":
+                profile = source.profile = namespace
+        if profile and profile != "default":
+            # Secondary-profile events must never fall through to the default profile's bot.
+            adapter = self._adapter_for_source(source)
+            if adapter is None:
+                logger.warning(
+                    "Dropping watch notification for profile %s: no live %s adapter for that profile "
+                    "in this gateway (not falling back to the default profile's bot) - session_key=%r",
+                    profile, platform_name, evt.get("session_key"),
+                )
+                return None
+        else:
+            adapter = self._resolve_injection_adapter(platform_name)
         if not adapter:
             return None
         if not adapter_supports_push(adapter):
@@ -927,8 +946,8 @@ class GatewayNotificationsMixin:
                 message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
             logger.info(
-                "Watch pattern notification — injecting for %s chat=%s thread=%s",
-                platform_name, source.chat_id, source.thread_id,
+                "Watch pattern notification — injecting for %s chat=%s thread=%s profile=%s",
+                platform_name, source.chat_id, source.thread_id, getattr(source, "profile", None) or "default",
             )
             # Relay egress priming: post-restart routing caches are cold (they warm only on inbound), so
             # replies would egress without tenant discriminators and be declined by the connector.
