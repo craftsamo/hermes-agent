@@ -31,39 +31,54 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
 _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
 
-# Prepended to the model's code for named sessions on SHARED browsers (a /browser connect CDP override): the
+# Prepended to the model's code for logical sessions on SHARED browsers (a /browser connect CDP override): the
 # harness daemon attaches to the first existing page at startup, so two fresh named daemons can land on the
 # SAME tab. Steering each onto a tab it created prevents clobbering. Runs once per daemon (marker keyed by
-# BU_NAME + daemon pid).
+# BU_NAME + daemon pid, in the private runtime when available).
 _OWN_TAB_PREAMBLE = """\
 # hermes: pin this named session to its own tab (once per daemon process)
 def _hermes_ensure_own_tab():
     import os as _os, tempfile as _tf
     _name = _os.environ.get("BU_NAME", "default")
+    _runtime = _os.environ.get("BH_RUNTIME_DIR")
+    _private = _runtime and _os.environ.get("BH_RUNTIME_DIR_SHARED") != "1"
     try:
         # Key the marker by the daemon's pid so a daemon restart (which
         # re-attaches to the first shared page) re-pins automatically,
         # while agent-driven tab switches mid-session are left alone.
-        from browser_harness import _ipc as _bipc
-        _dpid = _bipc.pid_path(_name).read_text().strip() or "0"
+        if _private:
+            # Owned per-instance runtimes use bu.pid, not bu-<name>.pid.
+            with open(_os.path.join(_runtime, "bu.pid"), encoding="utf-8") as _f:
+                _dpid = _f.read().strip()
+        else:
+            from browser_harness import _ipc as _bipc
+            _dpid = _bipc.pid_path(_name).read_text(encoding="utf-8").strip()
+        if not _dpid.isdecimal() or int(_dpid) <= 0:
+            raise ValueError("invalid daemon PID")
     except Exception:
-        _dpid = "0"
+        raise RuntimeError("Cannot identify browser daemon for tab isolation") from None
     _uid = _os.getuid() if hasattr(_os, "getuid") else 0
     _marker = _os.path.join(
-        _tf.gettempdir(), "hermes-bu-owntab-%s-%s-%s" % (_uid, _name, _dpid)
+        _runtime if _private else _tf.gettempdir(), "hermes-bu-owntab-%s-%s" % (_uid, _name)
     )
-    if _os.path.exists(_marker):
-        return
+    try:
+        with open(_marker, encoding="utf-8") as _f:
+            if _f.read() == _dpid:
+                return
+    except OSError:
+        pass
     try:
         # Force a fresh target: new_tab() would REUSE a blank current tab,
         # which is exactly the tab a sibling daemon may also hold.
         _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
-        if _tid:
-            switch_tab(_tid)
+        if not _tid:
+            return
+        switch_tab(_tid)
     except Exception:
-        pass  # best-effort: worst case is pre-fix behavior
+        return  # best-effort, but do not cache a failed tab switch
     try:
-        open(_marker, "w").close()
+        with open(_marker, "w", encoding="utf-8") as _f:
+            _f.write(_dpid)
     except OSError:
         pass
 _hermes_ensure_own_tab()
@@ -448,9 +463,9 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
         f"Cloud browser provider {provider_name} returned no CDP endpoint, so Browser Use mode "
         "cannot drive it. Switch to the built-in browser tools for this provider.",
     )
-    # A provider browser keyed bu-named-<name> is exclusive to this session — the
-    # own-tab preamble would just leak a blank tab into it.
-    if err is None and session_name:
+    # Provider browsers are exclusive to their named-session or task cache key;
+    # the own-tab preamble would just leak a blank tab into them.
+    if err is None:
         env[_PRIVATE_BROWSER_SENTINEL] = "1"
     return err
 
@@ -534,19 +549,36 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                           "then run `browser-use --doctor` to verify the setup.")
 
     env = _base_subprocess_env()
+    env.pop("BU_NAME", None)
     if session:
         if not _SESSION_RE.match(session):
-            return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
-                              "dashes, or underscores (e.g. 'r7k2').")
+            return tool_error(
+                f"Invalid session name {session!r}: use 1-64 letters, digits, "
+                "dashes, or underscores (e.g. 'r7k2')."
+            )
         env["BU_NAME"] = session
     route_err = _route_backend(env, session, task_id, bool(local))
     if route_err:
-        return tool_error(route_err)
+        from tools.browser_use_target import redact
 
-    # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
+        return tool_error(
+            redact(
+                route_err,
+                [
+                    env.get("BU_CDP_WS"),
+                    env.get("BU_CDP_URL"),
+                    os.getenv("BROWSER_CDP_URL"),
+                    _read_browser_cfg().get("cdp_url"),
+                ],
+            )
+        )
+
+    # SHARED browser (/browser connect CDP override): pin each logical session to its own tab (see
     # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
-    private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
-    if session and not private_browser:
+    private_browser = env.pop(
+        _PRIVATE_BROWSER_SENTINEL, None
+    )  # always pop: never exported to the CLI
+    if (session or _has_cdp_env(env)) and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
 
     workspace = _workspace_dir(task_id)
@@ -555,24 +587,56 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
 
     # BU_AUTOSPAWN makes the CLI start a Browser Use cloud browser when no local
     # Chrome/CDP endpoint is reachable (their API key authenticates it)
-    if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
+    if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(
+        _read_browser_cfg()
+    ):
         env["BU_AUTOSPAWN"] = "1"
 
     timeout = _clamp_timeout(timeout_s)
     started = time.time()
     try:
-        proc = subprocess.run(
-            cmd, input=code, capture_output=True, text=True, timeout=timeout, env=env,
-            **_windows_popen_kwargs(),
-        )
+        if _has_cdp_env(env):
+            from tools.browser_use_target import TargetError, run_targeted
+
+            try:
+                proc = run_targeted(
+                    cmd, code, env, session, task_id, timeout, _windows_popen_kwargs()
+                )
+            except subprocess.TimeoutExpired:
+                raise
+            except TargetError as error:
+                logger.warning("browser-use lifecycle failure: %s", str(error).partition(":")[0])
+                return tool_error(str(error))
+            except Exception:
+                logger.warning("browser-use lifecycle failure: ownership-or-runtime")
+                return tool_error(
+                    "Selected browser could not be verified or safely acquired. No fallback browser was used."
+                )
+        else:
+            proc = subprocess.run(
+                cmd,
+                input=code,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                **_windows_popen_kwargs(),
+            )
     except subprocess.TimeoutExpired:
-        return tool_error(f"browser-use exec timed out after {timeout}s. The daemon may still be working; retry "
-                          f"with a larger timeout_s (max {_MAX_TIMEOUT_S}), or split the work into several calls that "
-                          "append to workspace files — anything already written to the workspace is preserved.")
+        logger.warning("browser-use lifecycle failure: timeout")
+        return tool_error(
+            f"browser-use exec timed out after {timeout}s. The daemon may still be working; retry "
+            f"with a larger timeout_s (max {_MAX_TIMEOUT_S}), or split the work into several calls that "
+            "append to workspace files — anything already written to the workspace is preserved."
+        )
     except OSError as e:
         return tool_error(f"Failed to launch browser-use CLI: {e}")
 
-    result = {"success": proc.returncode == 0, "exit_code": proc.returncode, "output": proc.stdout}
+    result = {
+        "success": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "output": proc.stdout,
+    }
     if workspace:
         result["workspace"] = workspace
     if session:
