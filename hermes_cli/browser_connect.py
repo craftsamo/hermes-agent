@@ -392,40 +392,89 @@ def _secure_snapshot(path: str, *, contents: bool = False) -> None:
 _SQLITE_AUTH_DBS = frozenset({"Cookies", "Login Data", "Login Data For Account", "Web Data"})
 
 
-def _copy_auth_file(src_file: str, dst_file: str) -> bool:
-    """Copy one auth file, lock-aware; True on success. SQLite DBs use the online-backup API (works
-    under a Windows write lock), falling through to a raw copy; failure only if BOTH fail."""
+def _profile_remaining(deadline: float | None, limit: float) -> float:
+    remaining = limit if deadline is None else min(limit, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError(
+            "Real-profile browser preparation timed out; retry with a larger timeout_s."
+        )
+    return remaining
+
+
+def _copy_auth_file(
+    src_file: str, dst_file: str, *, deadline: float | None = None
+) -> bool:
+    """Copy auth with a shared deadline. Normal SQLite reads include committed WAL data;
+    immutable reads are a best-effort fallback for source contention. A busy/locked
+    database or an expired deadline never permits a raw-copy fallback."""
+    deadline = time.monotonic() + _profile_remaining(deadline, 5.0)
     os.makedirs(os.path.dirname(dst_file), exist_ok=True)
     if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
-        # With a live Chrome on macOS, mode=ro WITHOUT immutable=1 can hang connect/backup
-        # forever (blocked inside lock negotiation, so the busy-timeout never fires).
-        # immutable=1 reads instantly and is correct: we want a committed snapshot, not
-        # coordinated writes. A torn read raises → next mode, then the plain-copy fallback.
-        for uri in (f"file:{src_file}?mode=ro&immutable=1", f"file:{src_file}?mode=ro"):
+        allow_raw_copy = True
+        # Immutable skips lock coordination AND WAL; use it only when normal reads fail.
+        for uri in (f"file:{src_file}?mode=ro", f"file:{src_file}?mode=ro&immutable=1"):
             try:
-                # Short busy timeout so a truly wedged DB fails fast rather than hanging.
-                with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as source:
-                    with contextlib.closing(sqlite3.connect(dst_file)) as out, out:
-                        source.backup(out)
+                with contextlib.closing(
+                    sqlite3.connect(
+                        uri, uri=True, timeout=_profile_remaining(deadline, 0.25)
+                    )
+                ) as source:
+                    # Probe source contention before backup's retry loop so an exclusive
+                    # source lock can reach the second mode without exhausting the budget.
+                    source.execute("PRAGMA schema_version").fetchone()
+                    with (
+                        contextlib.closing(sqlite3.connect(dst_file, timeout=0)) as out,
+                        out,
+                    ):
+                        # busy_timeout does not bound backup's SQLITE_BUSY retry loop.
+                        def progress(status, remaining, total):
+                            _profile_remaining(deadline, 5.0)
+
+                        _profile_remaining(deadline, 5.0)
+                        source.backup(out, pages=128, progress=progress, sleep=0.05)
                 return True
+            except TimeoutError:
+                # Never raw-copy over a destination that may still be locked.
+                raise
+            except sqlite3.OperationalError as e:
+                if getattr(e, "sqlite_errorcode", None) in (
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                ):
+                    allow_raw_copy = False
+                logger.debug(
+                    "real-profile: sqlite-backup of %s failed: %s", src_file, e
+                )
             except Exception as e:
-                logger.debug("real-profile: sqlite-backup of %s failed (%s); trying next mode",
-                             src_file, e)
+                logger.debug(
+                    "real-profile: sqlite-backup of %s failed (%s); trying next mode",
+                    src_file,
+                    e,
+                )
+        if not allow_raw_copy:
+            return False
     try:
+        _profile_remaining(deadline, 5.0)
         shutil.copy2(src_file, dst_file)
         return True
+    except TimeoutError:
+        raise
     except OSError as e:
         logger.debug("real-profile: could not copy %s: %s", src_file, e)
         return False
 
 
-def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
+def _mirror_profile_auth(
+    src: str, dst: str, source_profile: str, *, deadline: float | None = None
+) -> int:
     """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it);
     returns the number of DB auth files that could NOT be copied (0 = clean)."""
     failed_dbs = 0
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
-        if os.path.isfile(s) and not _copy_auth_file(s, os.path.join(dst, "Default", rel)):
+        if os.path.isfile(s) and not _copy_auth_file(
+            s, os.path.join(dst, "Default", rel), deadline=deadline
+        ):
             failed_dbs += os.path.basename(rel) in _SQLITE_AUTH_DBS
     return failed_dbs
 
@@ -605,32 +654,98 @@ def _locked_profile_error(browser: str) -> str:
     return _PROFILE_LOCKED_PREFIX + msg
 
 
-def _copy_profile_tree(src: str, dst: str, source_profile: str) -> None:
+def _copy_profile_tree(
+    src: str, dst: str, source_profile: str, *, deadline=None
+) -> None:
     """Fresh (or torn-and-rebuilding) copy of the ACTIVE profile dir into the copy's Default,
     minus caches AND the SQLite auth DBs (raw copytree of a Chrome-held file raises on Windows);
     ``_mirror_profile_auth`` copies the DBs lock-aware instead."""
     dst_default = os.path.join(dst, "Default")
+
+    def copy_file(source, destination):
+        _profile_remaining(deadline, 60.0)
+        return shutil.copy2(source, destination)
+
     try:
         shutil.rmtree(dst_default, ignore_errors=True)
         shutil.copytree(
             os.path.join(src, source_profile),
             dst_default,
             dirs_exist_ok=True,
+            copy_function=copy_file,
             symlinks=False,
             ignore=shutil.ignore_patterns(*_SNAPSHOT_IGNORES, *_SQLITE_AUTH_DBS),
-            ignore_dangling_symlinks=True)
+            ignore_dangling_symlinks=True,
+        )
     except shutil.Error as multi:
         # Per-file failures (browser mid-write) are non-fatal.
         logger.info(
             "real-profile snapshot: %d file(s) skipped copying %s/%s",
-            len(multi.args[0]) if multi.args else 0, src, source_profile)
+            len(multi.args[0]) if multi.args else 0,
+            src,
+            source_profile,
+        )
 
 
-def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | None, str | None]:
+def _snapshot_in_use(dst: str, *, deadline=None) -> bool:
+    """Conservatively refuse writes when Chromium may own the snapshot, even without CDP metadata."""
+    import psutil
+
+    lock = os.path.join(dst, "SingletonLock")
+    if os.path.lexists(lock):
+        if os.name != "posix":
+            return True
+        try:
+            host, _, pid = os.readlink(lock).rpartition("-")
+            if (
+                host != socket.gethostname()
+                or not pid.isascii()
+                or not pid.isdecimal()
+                or int(pid) <= 0
+            ):
+                return True
+            if psutil.pid_exists(int(pid)):
+                return True
+        except (OSError, ValueError, OverflowError, psutil.Error):
+            return (
+                True  # Foreign, malformed, or unreadable ownership is not stale proof.
+            )
+    # Socket/cookie symlinks survive crashes. Even a proven-dead local lock PID
+    # needs a clear exact-directory scan before the existing snapshot cleanup runs.
+    target = os.path.normcase(os.path.realpath(dst))
+    for proc in psutil.process_iter():
+        _profile_remaining(deadline, 30.0)
+        try:
+            argv = proc.cmdline()
+            for i, arg in enumerate(argv):
+                value = (
+                    arg.partition("=")[2]
+                    if arg.startswith("--user-data-dir=")
+                    else (
+                        argv[i + 1]
+                        if arg == "--user-data-dir" and i + 1 < len(argv)
+                        else None
+                    )
+                )
+                if value and os.path.normcase(os.path.realpath(value)) == target:
+                    return True
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.AccessDenied, OSError, SystemError):
+            # macOS proc_cmdline can surface a sysctl permission race as SystemError.
+            # SingletonLock's host/PID check guards unreadable lock owners above.
+            continue
+    return False
+
+
+def snapshot_real_profile(
+    browser: str, src: str | None = None, *, deadline: float | None = None
+) -> tuple[str | None, str | None]:
     """Snapshot ``browser``'s real ACTIVE profile into the hermes copy dir; returns ``(dst, err)``.
     Copies ``Local State`` plus the active profile's auth files into the copy's ``Default``. The
     completion marker is written only after full success, so a torn first copy (disk full, Ctrl+C)
     never looks "already populated" — it is redone from scratch."""
+    deadline = time.monotonic() + _profile_remaining(deadline, 60.0)
     src = src or real_profile_data_dir(browser)
     if not src or not os.path.isdir(src):
         return None, (
@@ -640,6 +755,11 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
     if resolve_err or not source_profile:
         return None, resolve_err
     dst = real_profile_copy_dir(browser)
+    if _snapshot_in_use(dst, deadline=deadline):
+        return (
+            None,
+            "the profile copy may still be in use; refusing to overwrite its login data. Retry after the owned browser is safely closed.",
+        )
     # Fast lock probe BEFORE any copy: a blocking file op on a Windows-locked cookie DB can
     # hang the launch for minutes. Never trips on POSIX, so copy-while-running still works.
     if _profile_is_locked(src, source_profile):
@@ -654,11 +774,13 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         # first attempt or an older-build dir still converges to owner-only perms.
         for path in filter(None, (os.path.dirname(dst), dst)):
             _secure_snapshot(path)
+        _profile_remaining(deadline, 60.0)
         _sync_local_state(src, dst, source_profile)
         if not populated:
-            _copy_profile_tree(src, dst, source_profile)
+            _copy_profile_tree(src, dst, source_profile, deadline=deadline)
         # Both paths: lock-aware auth DB copy into Default — also the per-launch re-sync.
-        failed_dbs = _mirror_profile_auth(src, dst, source_profile)
+        _profile_remaining(deadline, 60.0)
+        failed_dbs = _mirror_profile_auth(src, dst, source_profile, deadline=deadline)
         if failed_dbs:  # even online-backup failed: never launch a silently signed-out session
             return None, (f"could not read the '{browser}' profile's login data ({failed_dbs} "
                           f"database(s) locked). Close {browser} and retry, or turn "
@@ -675,6 +797,8 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
             logger.debug("real-profile snapshot: could not write done marker: %s", e)
         # AFTER the marker write so the marker itself is covered; every pass, so old snapshots heal.
         _secure_snapshot(dst, contents=True)
+    except TimeoutError:
+        raise
     except OSError as e:
         return None, f"could not snapshot the '{browser}' profile into {dst}: {e}"
     return dst, None

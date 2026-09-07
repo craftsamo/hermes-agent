@@ -6,6 +6,7 @@ on the copy with a devtools port (see hermes_cli.browser_connect). These tests
 exercise the real functions with real file I/O wherever possible — the mocks
 are limited to OS detection and process launch.
 """
+import io
 import json
 import os
 import ntpath
@@ -328,20 +329,39 @@ class TestRealProfileCdpLaunch:
             (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n")
             return FakeChrome()
 
-        with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
-             patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
-             patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)), \
-             patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/chrome"), \
-             patch.object(bt.subprocess, "Popen", side_effect=fake_popen), \
-             patch.object(bt_real_profile, "_agent_browser_get_cdp",
-                          side_effect=["http://127.0.0.1:5000", "http://127.0.0.1:41000"]), \
-             patch.object(bt_real_profile, "_cdp_http_ready", return_value=True), \
-             patch.object(bt_real_profile, "_cdp_on_data_dir", return_value=False), \
-             patch.object(bt_real_profile, "_agent_browser_close_session",
-                          side_effect=lambda s: closed.__setitem__("n", closed["n"] + 1)), \
-             patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", return_value=proc), \
-             patch.object(bt_cloud, "_is_headed_mode", return_value=False):
+        with (
+            patch.object(bt_cloud, "_use_real_profile", return_value=True),
+            patch(
+                "hermes_cli.browser_connect.detect_default_chromium",
+                return_value="chrome",
+            ),
+            patch(
+                "hermes_cli.browser_connect.snapshot_real_profile",
+                return_value=(str(tmp_path), None),
+            ),
+            patch(
+                "hermes_cli.browser_connect.chromium_executable",
+                return_value="/usr/bin/chrome",
+            ),
+            patch.object(bt.subprocess, "Popen", side_effect=fake_popen),
+            patch.object(
+                bt_real_profile,
+                "_agent_browser_get_cdp",
+                side_effect=["http://127.0.0.1:5000", "http://127.0.0.1:41000"],
+            ),
+            patch.object(bt_real_profile, "_cdp_http_ready", return_value=True),
+            patch.object(bt_real_profile, "_cdp_on_data_dir", return_value=False),
+            patch.object(
+                bt_real_profile,
+                "_agent_browser_close_session",
+                side_effect=lambda s, **kw: closed.__setitem__("n", closed["n"] + 1),
+            ),
+            patch.object(
+                bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"
+            ),
+            patch.object(bt.subprocess, "run", return_value=proc),
+            patch.object(bt_cloud, "_is_headed_mode", return_value=False),
+        ):
             cdp, err = bt_real_profile._real_profile_cdp()
         assert closed["n"] == 1  # stale wrong-dir session was closed
         assert cdp == "http://127.0.0.1:41000"
@@ -356,20 +376,22 @@ class TestRealProfileCdpLaunch:
         import tools.browser_tool as bt
         self._reset()
         (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n")
-        version = Mock()
-        version.json.return_value = {"webSocketDebuggerUrl": f"ws://127.0.0.1:41000{live_browser_id}"}
+        version = {"webSocketDebuggerUrl": f"ws://127.0.0.1:41000{live_browser_id}"}
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(json.dumps(version).encode())
         with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
              patch("hermes_cli.browser_connect.real_profile_copy_dir", return_value=str(tmp_path)), \
              patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(None, "boom")) as snapshot, \
-             patch("requests.get", return_value=version), \
+             patch.object(bt_real_profile.urllib.request, "build_opener", return_value=opener), \
              patch.object(bt_real_profile, "_agent_browser_get_cdp", return_value=None), \
              patch.object(bt_real_profile, "_attach_agent_browser_to_real_profile",
                           return_value=("http://127.0.0.1:41000", None)) as attach:
             cdp, err = bt_real_profile._real_profile_cdp()
         if live_browser_id == "/devtools/browser/x":
             assert (cdp, err) == ("http://127.0.0.1:41000", None)
-            attach.assert_called_once_with(41000, str(tmp_path))
+            attach.assert_called_once()
+            assert attach.call_args.args == (41000, str(tmp_path))
             snapshot.assert_not_called()
         else:
             attach.assert_not_called()
@@ -1076,8 +1098,13 @@ class TestWindowsLockedProfileCopy:
         home = tmp_path / "hh"
         monkeypatch.setattr(bc, "get_hermes_home", lambda: home)
         # Force both sqlite-backup and raw copy to fail for the DB.
-        monkeypatch.setattr(bc, "_copy_auth_file",
-                            lambda s, d: False if os.path.basename(s) in bc._SQLITE_AUTH_DBS else True)
+        monkeypatch.setattr(
+            bc,
+            "_copy_auth_file",
+            lambda s, d, **kw: (
+                False if os.path.basename(s) in bc._SQLITE_AUTH_DBS else True
+            ),
+        )
         dst, err = bc.snapshot_real_profile("chrome", src=str(root))
         assert dst is None
         assert err and "login data" in err.lower() and "close" in err.lower()
