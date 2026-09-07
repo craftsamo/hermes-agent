@@ -253,6 +253,150 @@ _MCP_TOOL_PREFIX = "mcp__"
 _OAUTH_TOOL_NAME_ALIASES = {"session_search": "chat_history_lookup", "memory": "context_notes"}
 _OAUTH_TOOL_NAME_REVERSE_ALIASES = {wire_name: name for name, wire_name in _OAUTH_TOOL_NAME_ALIASES.items()}
 
+_OAUTH_INVOKE_LINE_RE = re.compile(
+    r"^[ \t]*<invoke\b(?=[^>\r\n]*\bname\s*=\s*"
+    r"(?:\"mcp__[A-Za-z0-9_.:-]+\"|'mcp__[A-Za-z0-9_.:-]+'))[^>\r\n]*>",
+    re.IGNORECASE,
+)
+
+
+def _oauth_invoke_markup_payloads(text: Any) -> list[str]:
+    """Extract standalone leaked Claude OAuth invoke blocks."""
+    if not isinstance(text, str) or "<invoke" not in text.lower():
+        return []
+    payloads: list[str] = []
+    fence: Optional[str] = None
+    offset = 0
+    lower_text = text.lower()
+    for line in text.splitlines(keepends=True):
+        marker = line.lstrip()[:3]
+        if marker in {"```", "~~~"}:
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            offset += len(line)
+            continue
+        match = _OAUTH_INVOKE_LINE_RE.match(line) if fence is None else None
+        if match:
+            close = lower_text.find("</invoke>", offset + match.end())
+            end = close + len("</invoke>") if close >= 0 else len(text)
+            payload = text[offset:end].strip()
+            if payload:
+                payloads.append(payload)
+            if close < 0:
+                break
+        offset += len(line)
+    return payloads
+
+
+def _text_has_oauth_invoke_markup(text: Any) -> bool:
+    return bool(_oauth_invoke_markup_payloads(text))
+
+
+def anthropic_oauth_text_has_invoke_markup(text: Any) -> bool:
+    """Public stream-safe wrapper for the narrow line-level detector."""
+    return _text_has_oauth_invoke_markup(text)
+
+
+def _content_oauth_invoke_payloads(content: Any) -> list[str]:
+    payloads: list[str] = []
+    if isinstance(content, str):
+        return _oauth_invoke_markup_payloads(content)
+    if not isinstance(content, list):
+        return payloads
+    for part in content:
+        if isinstance(part, str):
+            payloads.extend(_oauth_invoke_markup_payloads(part))
+        elif isinstance(part, dict) and part.get("type") == "text":
+            payloads.extend(_oauth_invoke_markup_payloads(part.get("text")))
+    return payloads
+
+
+def anthropic_oauth_message_text_invoke_payloads(message: Any) -> tuple[str, ...]:
+    """Return standalone OAuth invoke blocks from assistant text carriers."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return ()
+    payloads = []
+    for key in ("content", "api_content", "anthropic_content_blocks"):
+        payloads.extend(_content_oauth_invoke_payloads(message.get(key)))
+    return tuple(dict.fromkeys(payload.strip() for payload in payloads if payload.strip()))
+
+
+def anthropic_oauth_message_invoke_payloads(message: Any) -> tuple[str, ...]:
+    """Return malformed text payloads while finish metadata is still present."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return ()
+    if message.get("finish_reason") not in {"tool_calls", "tool_use"}:
+        return ()
+    if message.get("tool_calls"):
+        return ()
+    return anthropic_oauth_message_text_invoke_payloads(message)
+
+
+def anthropic_oauth_message_has_invoke_markup(message: Any) -> bool:
+    """Inspect only assistant-text carriers, never tool inputs or user data."""
+    return bool(anthropic_oauth_message_invoke_payloads(message))
+
+
+def _remove_oauth_invoke_payloads(content: Any, payloads: set[str]) -> Any:
+    if isinstance(content, str):
+        cleaned = content
+        changed = False
+        for payload in payloads:
+            if payload in cleaned:
+                cleaned = cleaned.replace(payload, "")
+                changed = True
+        return cleaned.strip() if changed else content
+    if not isinstance(content, list):
+        return content
+    cleaned_parts = []
+    for part in content:
+        if isinstance(part, str):
+            cleaned = _remove_oauth_invoke_payloads(part, payloads)
+            if cleaned:
+                cleaned_parts.append(cleaned)
+        elif isinstance(part, dict) and part.get("type") == "text":
+            cleaned = _remove_oauth_invoke_payloads(part.get("text"), payloads)
+            if cleaned:
+                cleaned_parts.append({**part, "text": cleaned})
+        else:
+            cleaned_parts.append(part)
+    return cleaned_parts
+
+
+def remove_anthropic_oauth_invoke_payloads(message: Dict[str, Any], payloads: set[str]) -> Optional[Dict[str, Any]]:
+    """Remove known malformed payloads while preserving merged assistant data."""
+    if message.get("role") != "assistant" or not payloads:
+        return message
+    cleaned = dict(message)
+    for key in ("content", "api_content", "anthropic_content_blocks", "_anthropic_content_blocks"):
+        if key in cleaned:
+            cleaned[key] = _remove_oauth_invoke_payloads(cleaned[key], payloads)
+    content = cleaned.get("content")
+    has_content = bool(content.strip()) if isinstance(content, str) else bool(content)
+    has_payload = any(cleaned.get(key) for key in (
+        "tool_calls", "reasoning", "reasoning_content", "reasoning_details",
+        "anthropic_content_blocks", "_anthropic_content_blocks",
+    ))
+    return cleaned if has_content or has_payload else None
+
+
+def anthropic_oauth_response_has_invoke_markup(response: Any) -> bool:
+    """Detect malformed OAuth tool markup in raw Anthropic text blocks."""
+    if getattr(response, "stop_reason", None) != "tool_use":
+        return False
+    blocks = getattr(response, "content", None)
+    if not isinstance(blocks, list):
+        return False
+    if any(getattr(block, "type", None) == "tool_use" for block in blocks):
+        return False
+    return any(
+        getattr(block, "type", None) == "text"
+        and _text_has_oauth_invoke_markup(getattr(block, "text", None))
+        for block in blocks
+    )
+
 # Aliases ALSO safe to substitute in free-form prose (system prompt, tool descriptions). "memory"
 # is ordinary English throughout the prompt and inside the memory tool's own parameter docs (an
 # enum the model must emit verbatim), so rewriting it would corrupt guidance; a model that calls

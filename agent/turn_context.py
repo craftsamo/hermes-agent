@@ -948,6 +948,7 @@ def _sanitize_model_for(agent: Any, moa_config: Any) -> Any:
 def build_api_messages(
     agent: Any, messages: List[Dict[str, Any]], *, current_turn_user_idx: Any,
     ext_prefetch_cache: Any, plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
+    oauth_replay_targets=None, oauth_replay_entries=None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Build the wire copy of ``messages`` for one API call plus the effective system
     message. Returns ``(api_messages, effective_system)``.
@@ -963,10 +964,16 @@ def build_api_messages(
     from agent.conversation_loop import _clone_message_for_send
 
     api_messages = []
+    from agent.anthropic_oauth_replay import _ANTHROPIC_OAUTH_REPLAY_MARKER
     for idx, msg in enumerate(messages):
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
+        payloads = (oauth_replay_targets or {}).get(id(msg))
+        if payloads and oauth_replay_entries is not None:
+            marker = len(oauth_replay_entries)
+            api_msg[_ANTHROPIC_OAUTH_REPLAY_MARKER] = marker
+            oauth_replay_entries[marker] = {"payloads": tuple(sorted(payloads)), "original": None}
         # api_content is bookkeeping (exact bytes sent), never a provider field — pop
         # it from EVERY outgoing copy. display_* is display-only timeline metadata
         # (strict OpenAI backends reject unknown keys); _row_id is the durable row id

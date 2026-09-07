@@ -2974,6 +2974,71 @@ class _StreamingCall(StreamingWaitMonitor):
         per-request ``request_client`` so the watchdog can abort this socket
         without closing the shared client mid-flight."""
         has_tool_use = False
+        quarantine_oauth_deltas = bool(getattr(self.agent, "_is_anthropic_oauth", False))
+        oauth_line_buffer = ""
+        oauth_fence_marker = None
+        oauth_quarantine_active = False
+        pending_oauth_deltas = []
+        emitters = {"tool": self._emit_tool_started, "text": self._emit_text, "reasoning": self._emit_reasoning}
+
+        def _queue_or_deliver_anthropic_delta(kind, payload):
+            nonlocal oauth_fence_marker, oauth_line_buffer, oauth_quarantine_active
+            if not quarantine_oauth_deltas:
+                emitters[kind](payload)
+                return
+            if oauth_quarantine_active:
+                pending_oauth_deltas.append((kind, payload))
+                return
+            if kind != "text":
+                emitters[kind](payload)
+                return
+            from agent.anthropic_adapter import anthropic_oauth_text_has_invoke_markup
+            oauth_line_buffer += payload
+            while "\n" in oauth_line_buffer:
+                line, oauth_line_buffer = oauth_line_buffer.split("\n", 1)
+                line += "\n"
+                line_marker = line.lstrip()[:3]
+                if line_marker in {"```", "~~~"}:
+                    if oauth_fence_marker is None:
+                        oauth_fence_marker = line_marker
+                    elif oauth_fence_marker == line_marker:
+                        oauth_fence_marker = None
+                    emitters["text"](line)
+                elif oauth_fence_marker is None and anthropic_oauth_text_has_invoke_markup(line):
+                    oauth_quarantine_active = True
+                    pending_oauth_deltas.append(("text", line + oauth_line_buffer))
+                    oauth_line_buffer = ""
+                    return
+                else:
+                    emitters["text"](line)
+            stripped = oauth_line_buffer.lstrip().lower()
+            marker = "<invoke"
+            fence_prefix = oauth_fence_marker or ""
+            if oauth_fence_marker and stripped.startswith(oauth_fence_marker):
+                oauth_fence_marker = None
+                emitters["text"](oauth_line_buffer)
+                oauth_line_buffer = ""
+            elif oauth_fence_marker and stripped and not fence_prefix.startswith(stripped):
+                emitters["text"](oauth_line_buffer)
+                oauth_line_buffer = ""
+            elif oauth_fence_marker:
+                pass
+            elif stripped and any(
+                candidate.startswith(stripped) or stripped.startswith(candidate)
+                for candidate in ("```", "~~~")
+            ):
+                if len(stripped) >= 3:
+                    oauth_fence_marker = stripped[:3]
+                    emitters["text"](oauth_line_buffer)
+                    oauth_line_buffer = ""
+            elif anthropic_oauth_text_has_invoke_markup(oauth_line_buffer):
+                oauth_quarantine_active = True
+                pending_oauth_deltas.append(("text", oauth_line_buffer))
+                oauth_line_buffer = ""
+            elif stripped and not (marker.startswith(stripped) or stripped.startswith(marker)):
+                emitters["text"](oauth_line_buffer)
+                oauth_line_buffer = ""
+
         # Eventless stream: the SDK's get_final_message() raises AssertionError (no
         # message_start); shims may fabricate a contentless Message. All -> EmptyStreamError.
         saw_stream_event = False
@@ -3018,16 +3083,16 @@ class _StreamingCall(StreamingWaitMonitor):
                     if block and getattr(block, "type", None) == "tool_use":
                         has_tool_use = True
                         if getattr(block, "name", None):
-                            self._emit_tool_started(block.name)
+                            _queue_or_deliver_anthropic_delta("tool", block.name)
                 elif event_type == "content_block_delta":
                     delta = getattr(event, "delta", None)
                     delta_type = getattr(delta, "type", None) if delta else None
                     if delta_type == "text_delta":
                         text = getattr(delta, "text", "")
                         if text and not has_tool_use:
-                            self._emit_text(text)
+                            _queue_or_deliver_anthropic_delta("text", text)
                     elif delta_type == "thinking_delta" and getattr(delta, "thinking", ""):
-                        self._emit_reasoning(delta.thinking)
+                        _queue_or_deliver_anthropic_delta("reasoning", delta.thinking)
             raw_stream = _stream_context["stream"]
             if not self.agent._interrupt_requested and raw_stream is not None:
                 try:
@@ -3049,9 +3114,23 @@ class _StreamingCall(StreamingWaitMonitor):
             return None
         if base_final_message is not None:
             self._check_anthropic_message(base_final_message, tool_drop=False)
-            if not stream.output_modified:
-                return self._check_anthropic_message(base_final_message)
-        return self._check_anthropic_message(accumulator.response(base_final_message))
+        final_message = self._check_anthropic_message(
+            base_final_message if base_final_message is not None and not stream.output_modified
+            else accumulator.response(base_final_message)
+        )
+        if quarantine_oauth_deltas and oauth_line_buffer:
+            _queue_or_deliver_anthropic_delta("text", "")
+            if oauth_line_buffer:
+                self._emit_text(oauth_line_buffer)
+                oauth_line_buffer = ""
+        if oauth_quarantine_active and self._writer_still_current("Anthropic streaming"):
+            from agent.anthropic_adapter import anthropic_oauth_response_has_invoke_markup
+            if not anthropic_oauth_response_has_invoke_markup(final_message):
+                for kind, payload in pending_oauth_deltas:
+                    if not self._writer_still_current("Anthropic streaming"):
+                        break
+                    emitters[kind](payload)
+        return final_message
 
     # ── retry loop ──────────────────────────────────────────────────────
 

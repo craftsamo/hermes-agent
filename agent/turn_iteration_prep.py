@@ -29,6 +29,7 @@ class IterationPrep:
     action: str
     messages: Any
     request_logger: Any
+    _oauth_replay_targets: Any = None
 
 
 def prepare_iteration(agent: Any,*, messages: Any, api_call_count: Any) -> IterationPrep:
@@ -107,6 +108,8 @@ def prepare_iteration(agent: Any,*, messages: Any, api_call_count: Any) -> Itera
         )
 
     messages = [msg for msg in messages if not _is_scaffold_ghost(msg)]
+    from agent.anthropic_oauth_replay import _anthropic_oauth_replay_targets
+    _oauth_replay_targets = _anthropic_oauth_replay_targets(messages)
 
     # Repair malformed role alternation (tool→user / user→user tails): providers
     # return empty content on them and the empty-retry loop spins. The _with_cursor
@@ -119,7 +122,8 @@ def prepare_iteration(agent: Any,*, messages: Any, api_call_count: Any) -> Itera
             repaired_seq,
             agent.session_id or "-",
         )
-    return IterationPrep(action="fallthrough", messages=messages, request_logger=request_logger)
+    return IterationPrep(action="fallthrough", messages=messages, request_logger=request_logger,
+                         _oauth_replay_targets=_oauth_replay_targets)
 
 
 def _previous_tool_round(messages: Any) -> list:
