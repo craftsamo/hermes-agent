@@ -73,6 +73,17 @@ class TestAutoVoiceReplyFormat:
             voice_event, "hello", [], already_sent=True
         ) is True
 
+    @pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.DISCORD])
+    def test_global_auto_tts_requires_voice_input(self, platform):
+        """Global auto-TTS must not speak ordinary text without /voice tts."""
+        runner = _make_runner()
+        adapter = _make_adapter(platform)
+        adapter._should_auto_tts_for_chat = MagicMock(return_value=True)
+        runner.adapters[platform] = adapter
+        text_event = _make_event(platform, message_type=MessageType.TEXT)
+
+        assert runner._should_send_voice_reply(text_event, "hello", []) is False
+
     def test_should_send_voice_reply_voice_only_still_requires_voice_input(self):
         """Explicit voice_only must not widen to text input (#73508 regression).
 
