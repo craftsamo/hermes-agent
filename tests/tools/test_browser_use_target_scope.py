@@ -700,7 +700,9 @@ def test_malformed_cdp_config_does_not_break_error_redaction(
     harness, monkeypatch, cdp_url
 ):
     message = "Upstream failed. See https://example.com/help?topic=browser"
-    monkeypatch.setattr(browser_use_cli, "_route_backend", lambda *args: message)
+    monkeypatch.setattr(
+        browser_use_cli, "_route_backend", lambda *args, **kwargs: message
+    )
     monkeypatch.setattr(
         browser_use_cli, "_read_browser_cfg", lambda: {"cdp_url": cdp_url}
     )

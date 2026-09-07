@@ -470,7 +470,9 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     return err
 
 
-def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
+def _resolve_real_profile_cdp(
+    env: dict, force_local: bool, deadline=None
+) -> Optional[str]:
     """Point the harness at the user's real-profile copy-browser (a SNAPSHOT of their default Chromium
     profile, hermes_cli.browser_connect) when consented. Two ways in: the effective backend is already local
     (no provider, CDP override, or legacy BU cloud config) → silent upgrade; or ``force_local`` (consent-gated
@@ -493,18 +495,20 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
     if not force_local and (_quiet(_get_cloud_provider, object()) is not None
                             or is_legacy_browser_use_cloud_config(_read_browser_cfg())):
         return None
-    cdp, err = _real_profile_cdp()
+    cdp, err = _real_profile_cdp(deadline=deadline)
     if cdp and not err:
         _set_cdp_env(env, cdp)
     return err or None
 
 
-def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool) -> Optional[str]:
+def _route_backend(
+    env: dict, session: str, task_id: Optional[str], local: bool, deadline=None
+) -> Optional[str]:
     """Resolve where the harness connects; returns an error string or None. Real-profile consent runs
     BEFORE provider resolution so a hit short-circuits the cloud path via the BU_CDP_* env contract. Named
     sessions compose with the backend: BU_NAME namespaces the harness daemon (IPC socket, log, pid) and on
     provider backends additionally keys its own cloud browser."""
-    rp_err = _resolve_real_profile_cdp(env, force_local=local)
+    rp_err = _resolve_real_profile_cdp(env, force_local=local, deadline=deadline)
     if rp_err:
         return rp_err
     # local=True is only served by the real-profile route; consent off must not pretend.
@@ -535,6 +539,9 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
     from tools.registry import tool_error, tool_result
+
+    timeout = _clamp_timeout(timeout_s)
+    deadline = time.monotonic() + timeout
     if not code or not code.strip():
         return tool_error("No code provided. Pass Python that uses the pre-imported helpers, e.g. new_tab(\"https://example.com\") then print(page_info()).")
 
@@ -557,7 +564,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                 "dashes, or underscores (e.g. 'r7k2')."
             )
         env["BU_NAME"] = session
-    route_err = _route_backend(env, session, task_id, bool(local))
+    try:
+        route_err = _route_backend(
+            env, session, task_id, bool(local), deadline=deadline
+        )
+    except TimeoutError as error:
+        return tool_error(str(error))
     if route_err:
         from tools.browser_use_target import redact
 
@@ -592,15 +604,18 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     ):
         env["BU_AUTOSPAWN"] = "1"
 
-    timeout = _clamp_timeout(timeout_s)
     started = time.time()
     try:
+        # Backend preparation (real-profile snapshot, lock waits) already spent part of the budget.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd, timeout)
         if _has_cdp_env(env):
             from tools.browser_use_target import TargetError, run_targeted
 
             try:
                 proc = run_targeted(
-                    cmd, code, env, session, task_id, timeout, _windows_popen_kwargs()
+                    cmd, code, env, session, task_id, remaining, _windows_popen_kwargs()
                 )
             except subprocess.TimeoutExpired:
                 raise
@@ -618,7 +633,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                 input=code,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
+                timeout=remaining,
                 env=env,
                 **_windows_popen_kwargs(),
             )
