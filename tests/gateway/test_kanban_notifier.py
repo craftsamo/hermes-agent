@@ -130,6 +130,16 @@ def test_kanban_notifier_replays_telegram_dm_topic_delivery_metadata(tmp_path, m
     assert len(adapter.handled) == 1
     assert adapter.handled[0].source.chat_type == "dm"
     assert adapter.handled[0].source.thread_id == "20197"
+    assert adapter.handled[0].source.message_id == "462"
+
+    from gateway.platforms.base import _thread_metadata_for_source
+
+    assert _thread_metadata_for_source(adapter.handled[0].source) == {
+        "thread_id": "20197",
+        "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "20197",
+        "telegram_reply_to_message_id": "462",
+    }
 
 
 def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):

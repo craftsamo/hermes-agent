@@ -460,15 +460,18 @@ class _KanbanNotification:
         # (#60600 rows) — fall back to that, then to "group" (the historical default that suits the
         # dashboard/group flows). handle_message() get_or_create_session's the target, so a mismatch only
         # ever degrades to a fresh session, never an exception.
+        _delivery_meta = sub.get("delivery_metadata")
+        if not isinstance(_delivery_meta, dict):
+            _delivery_meta = {}
         _chat_type = str(sub.get("chat_type") or "").strip()
         if not _chat_type:
-            _delivery_meta = sub.get("delivery_metadata")
-            if isinstance(_delivery_meta, dict):
-                _chat_type = str(_delivery_meta.get("chat_type") or "").strip()
+            _chat_type = str(_delivery_meta.get("chat_type") or "").strip()
+        _message_id = str(_delivery_meta.get("telegram_reply_to_message_id") or "").strip() or None
         _source = SessionSource(
             platform=self.plat, chat_id=sub["chat_id"], chat_type=_chat_type or "group",
             thread_id=sub.get("thread_id") or None, user_id=sub.get("user_id"), user_id_alt=sub.get("user_id_alt"),
             profile=self.sub_profile or None, scope_id=_wake_scope_id(self.adapter, sub),
+            message_id=_message_id,
         )
         await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key, source=_source)
         self._log_woke()
