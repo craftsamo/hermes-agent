@@ -8,8 +8,9 @@ Covers the three seams the integration relies on:
   returns False so every legacy ``browser_*`` tool (including
   browser_cdp/browser_dialog, whose check_fns funnel through it) is hidden,
   and ``browser_exec`` is advertised instead.
-* ``browser_exec`` execution — code is piped on stdin, ``session`` becomes
-  ``BU_NAME``, bad session names and a missing CLI produce actionable errors.
+* ``browser_exec`` routing — the original ``session`` keys provider caches and
+  remains in results; CDP execution uses a derived Hermes-owned internal name.
+  Lifecycle/process contracts live in test_browser_use_target_scope.py.
 """
 import json
 import os
@@ -19,9 +20,33 @@ import time
 import pytest
 
 import tools.browser_use_cli as bu_cli
+import tools.browser_use_target as bu_target
 from tools import browser_tool_install as bt_install
 from tools import browser_tool_cloud as bt_cloud
 from tools import browser_tool_session as bt_session
+
+
+@pytest.fixture(autouse=True)
+def _fake_target_lifecycle(monkeypatch):
+    """Routing tests use shell CLIs, not daemons. The target-scope suite exercises
+    the real lifecycle with isolated processes and IPC instead of this seam."""
+
+    def run(cmd, code, env, session, task_id, timeout, popen_kwargs):
+        env["BU_NAME"] = (
+            "hermes-"
+            + bu_target._scope_key(bu_cli.get_hermes_home(), session, task_id)[:24]
+        )
+        return bu_cli.subprocess.run(
+            cmd,
+            input=code,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            **popen_kwargs,
+        )
+
+    monkeypatch.setattr(bu_target, "run_targeted", run)
 
 
 @pytest.fixture(autouse=True)
@@ -497,7 +522,8 @@ class TestBackendCdpResolution:
         result = json.loads(bu_cli.browser_exec("print(1)", session="r7k2"))
         assert result["success"] is True
         assert seen == ["bu-named-r7k2"]
-        assert "bu:r7k2" in result["output"]
+        assert "bu:hermes-" in result["output"]
+        assert result["session"] == "r7k2"
         assert "ws:wss://browser.example/cdp/bu-named-r7k2" in result["output"]
 
     def test_named_session_key_stable_across_tasks(self, monkeypatch):
@@ -894,11 +920,11 @@ class TestBrowserExec:
         assert 'got:print("hi")' in result["output"]
         assert "session" not in result
 
-    def test_session_sets_bu_name(self, tmp_path, monkeypatch):
+    def test_session_preserved_with_internal_daemon_name(self, tmp_path, monkeypatch):
         cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "bu:$BU_NAME"\n')
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
         result = json.loads(bu_cli.browser_exec("print(1)", session="r7k2"))
-        assert "bu:r7k2" in result["output"]
+        assert "bu:hermes-" in result["output"]
         assert result["session"] == "r7k2"
 
     def test_invalid_session_name_rejected(self, monkeypatch, tmp_path):
