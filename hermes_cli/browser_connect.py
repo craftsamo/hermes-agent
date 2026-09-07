@@ -486,6 +486,36 @@ def _resolve_source_profile(src: str) -> tuple[str | None, str | None]:
     return _last_used_profile(src), None
 
 
+def _real_profile_binary() -> str | None:
+    """``browser.real_profile_binary``: an alternate executable to launch on the snapshot."""
+    path = _browser_setting("real_profile_binary")
+    return os.path.expanduser(path.strip()) if isinstance(path, str) and path.strip() else None
+
+
+def real_profile_executable(browser: str) -> tuple[str | None, str | None]:
+    """``(executable, error)`` for the real-profile launch: ``browser.real_profile_binary`` when set,
+    else the detected browser's own binary.
+
+    The override exists for macOS, where LaunchServices treats every process running out of one
+    app bundle as ONE app: while the headless snapshot browser launched from
+    ``/Applications/<Browser>.app`` is alive, a Dock / Spotlight / ``open`` launch of that same
+    bundle only activates it, so the user's everyday browser cannot be opened until Hermes exits.
+    A CLONE of the bundle at another path (``cp -Rc``, signature untouched) does not share that
+    identity but still decrypts the Keychain-protected cookies, because the ``Safe Storage`` ACL
+    matches on bundle identifier + team, not on path. A configured path that is not an executable
+    FAILS CLOSED — falling back to the real bundle would silently reintroduce the collision.
+    """
+    override = _real_profile_binary()
+    if override is None:
+        return chromium_executable(browser), None
+    if os.path.isfile(override) and os.access(override, os.X_OK):
+        return override, None
+    return None, (
+        f"browser.real_profile_binary is set to {override!r} but that is not an executable file. "
+        "Point it at the browser binary inside the bundle (e.g. '<Clone>.app/Contents/MacOS/<Browser>'), "
+        "or remove it to launch the detected browser's own binary.")
+
+
 def _real_profile_autoclose() -> bool:
     """Whether browser.real_profile_autoclose consent is on (config read)."""
     return bool(_browser_setting("real_profile_autoclose") or False)

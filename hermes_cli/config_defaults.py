@@ -415,6 +415,14 @@ DEFAULT_CONFIG = {
         # 2"). Empty = browser's last-used profile, which on multi-profile machines can hand the
         # agent the wrong identity. A pin naming a missing directory FAILS CLOSED.
         "real_profile_pin": "",
+        # Launch the real-profile snapshot with THIS executable instead of the detected browser's
+        # own binary. macOS: LaunchServices treats every process out of one app bundle as one app,
+        # so while the headless snapshot browser from /Applications/<Browser>.app is alive a Dock /
+        # Spotlight launch only activates it and the everyday browser cannot be opened. Point this
+        # at an APFS clone of the bundle (`cp -Rc`, signature untouched) at another path: no shared
+        # identity, and Keychain-encrypted cookies still decrypt (the Safe Storage ACL matches on
+        # bundle id + team, not path). A path that is not an executable FAILS CLOSED.
+        "real_profile_binary": "",
         # restrict_evaluate: opt-in denylist blocking sensitive JS primitives (cookies/storage/
         # clipboard/network/form values) in browser_console(expression=...); allow_unsafe_evaluate
         # is the legacy override that bypasses that denylist entirely.
