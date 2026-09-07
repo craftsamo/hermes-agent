@@ -304,6 +304,38 @@ class TestResolveToolsetIncludeRegistry:
 class TestResolveToolsetMemo:
     """Measured-work pins for the generation-keyed resolution memo."""
 
+    def test_profile_switch_isolates_warm_toolset_cache(self, monkeypatch, tmp_path):
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+        reg = ToolRegistry()
+        monkeypatch.setattr("tools.registry.registry", reg)
+        monkeypatch.setattr(toolsets_mod, "_resolve_toolset_memo", {})
+        homes = [tmp_path / "default", tmp_path / "audio"]
+        token = set_hermes_home_override(homes[1])
+        try:
+            reg.register(
+                name="profile_voice_probe", toolset="tts",
+                schema=_make_schema("profile_voice_probe"), handler=_dummy_handler,
+                scope=reg.current_scope_key(),
+            )
+        finally:
+            reset_hermes_home_override(token)
+        generation = reg._generation
+
+        # All registrations precede all lookups: switching scope cannot hide
+        # this regression behind a generation bump. Check both warming orders.
+        for order in ((0, 1, 0, 1), (1, 0, 1, 0)):
+            toolsets_mod._resolve_toolset_memo.clear()
+            for index in order:
+                token = set_hermes_home_override(homes[index])
+                try:
+                    names = resolve_toolset("tts")
+                    assert ("profile_voice_probe" in names) == (index == 1)
+                    assert names == sorted(get_toolset("tts")["tools"])
+                    assert reg._generation == generation
+                finally:
+                    reset_hermes_home_override(token)
+
     def test_second_resolution_is_cached(self, monkeypatch):
         """Repeated resolves of the same toolset must not re-walk the registry.
 
@@ -337,7 +369,7 @@ class TestResolveToolsetMemo:
             f"got {get_toolset_calls['n']} calls"
         )
         assert (
-            "hermes-cli", True, registry_id, generation
+            "hermes-cli", True, registry_id, generation, registry.current_scope_key()
         ) in toolsets_mod._resolve_toolset_memo
 
     def test_generation_bump_invalidates_memo(self, monkeypatch):
@@ -372,4 +404,3 @@ class TestResolveToolsetMemo:
         second = resolve_toolset("hermes-cli", include_registry=False)
         assert first == second
         assert first  # non-empty sanity
-

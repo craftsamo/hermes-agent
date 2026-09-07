@@ -321,9 +321,9 @@ def bundle_non_core_tools(toolset_name: str) -> Set[str]:
     return to_remove - core
 
 
-# Memo keyed on (name, include_registry, id(registry), registry generation);
+# Memo keyed on (name, include_registry, id(registry), generation, profile scope);
 # engages only at the public entry (visited is None).
-_resolve_toolset_memo: Dict[Tuple[str, bool, int, int], List[str]] = {}
+_resolve_toolset_memo: Dict[Tuple[str, bool, int, int, str], List[str]] = {}
 
 
 def _plugin_platform_bundle(name: str) -> List[str]:
@@ -357,7 +357,9 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
     """
     external_call = visited is None
     if external_call:
-        memo_key = (name, include_registry, *_registry_generation())
+        # Profile switches change the visible overlay without a registry mutation.
+        scope = _registry_call("current_scope_key", "") if include_registry else ""
+        memo_key = (name, include_registry, *_registry_generation(), scope)
         cached = _resolve_toolset_memo.get(memo_key)
         if cached is not None:
             return list(cached)
