@@ -419,13 +419,102 @@ def _copy_auth_file(src_file: str, dst_file: str) -> bool:
         return False
 
 
+class _CookieMergeUnsupported(Exception):
+    """The two cookie stores cannot be merged row-by-row; overwrite instead."""
+
+
+def _cookie_unique_columns(conn: sqlite3.Connection, schema: str) -> list[str]:
+    """Columns of the cookies table's UNIQUE index (Chrome's cookie identity)."""
+    for _seq, name, unique, *_ in conn.execute(f"PRAGMA {schema}.index_list('cookies')"):
+        if unique:
+            cols = [row[2] for row in conn.execute(f"PRAGMA {schema}.index_info('{name}')")]
+            if cols:
+                return cols
+    raise _CookieMergeUnsupported("no unique index on cookies")
+
+
+def _merge_cookie_db(src_file: str, dst_file: str) -> bool:
+    """Merge ``src_file``'s cookies into an EXISTING copy ``dst_file``, newest row wins.
+
+    A plain overwrite would discard every cookie the copy-browser itself refreshed since the
+    last launch. Google rotates its session cookies (``__Secure-*PSIDTS``) a few times an hour
+    and treats an older value as a stolen session, so once the copy has browsed, the user's
+    profile holds the STALE value: overwriting with it signs the copy out, and re-copying after
+    the user signs in again just restarts the clock. Row-level merge keeps whichever side
+    updated a cookie last (``last_update_utc``), so a sign-in the user makes in their own
+    browser still lands in the copy while the copy's own rotations survive a relaunch.
+    Deletions do not propagate — a sign-out in the user's browser leaves the copy signed in
+    until it is deleted from the store.
+
+    Raises ``_CookieMergeUnsupported`` when the two stores differ in schema (a Chrome
+    upgrade between launches) or either is not a cookie store; callers overwrite then.
+    """
+    # URI mode on the main connection is what lets the ATTACHed source be opened read-only,
+    # so the user's live store is never written. Both paths go through ``pathname2url``
+    # because a raw path with ``?`` / ``#`` / ``%`` would be parsed as URI syntax.
+    from urllib.request import pathname2url
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"file:{pathname2url(dst_file)}", uri=True, timeout=5)
+        ) as conn:
+            conn.execute("ATTACH DATABASE ? AS src", (f"file:{pathname2url(src_file)}?mode=ro",))
+            try:
+                versions = {
+                    schema: dict(conn.execute(f"SELECT key, value FROM {schema}.meta"))
+                    for schema in ("main", "src")
+                }
+                if versions["main"].get("version") != versions["src"].get("version"):
+                    raise _CookieMergeUnsupported("cookie store versions differ")
+                cols = {
+                    schema: [row[1] for row in conn.execute(f"PRAGMA {schema}.table_info('cookies')")]
+                    for schema in ("main", "src")
+                }
+                if not cols["main"] or cols["main"] != cols["src"] or "last_update_utc" not in cols["main"]:
+                    raise _CookieMergeUnsupported("cookie table columns differ")
+                key = _cookie_unique_columns(conn, "main")
+                if key != _cookie_unique_columns(conn, "src"):
+                    raise _CookieMergeUnsupported("cookie identity columns differ")
+                column_list = ", ".join(f'"{c}"' for c in cols["main"])
+                match = " AND ".join(f'd."{c}" IS s."{c}"' for c in key)
+                with conn:
+                    conn.execute(
+                        f"INSERT OR REPLACE INTO main.cookies ({column_list}) "
+                        f"SELECT {column_list} FROM src.cookies AS s "
+                        f"WHERE NOT EXISTS (SELECT 1 FROM main.cookies AS d "
+                        f"WHERE {match} AND d.last_update_utc >= s.last_update_utc)"
+                    )
+            finally:
+                conn.execute("DETACH DATABASE src")
+        return True
+    except _CookieMergeUnsupported:
+        raise
+    except sqlite3.OperationalError as e:
+        if getattr(e, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            logger.debug("real-profile: cookie merge of %s blocked: %s", dst_file, e)
+            return False
+        raise _CookieMergeUnsupported(str(e)) from e
+    except sqlite3.DatabaseError as e:
+        raise _CookieMergeUnsupported(str(e)) from e
+
+
+def _refresh_auth_file(src_file: str, dst_file: str) -> bool:
+    """Bring one auth file in the copy up to date: cookie stores that already exist in the
+    copy are MERGED (see ``_merge_cookie_db``); everything else is copied over."""
+    if os.path.basename(src_file) == "Cookies" and os.path.isfile(dst_file):
+        try:
+            return _merge_cookie_db(src_file, dst_file)
+        except _CookieMergeUnsupported as e:
+            logger.info("real-profile: overwriting %s instead of merging (%s)", dst_file, e)
+    return _copy_auth_file(src_file, dst_file)
+
+
 def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
     """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it);
     returns the number of DB auth files that could NOT be copied (0 = clean)."""
     failed_dbs = 0
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
-        if os.path.isfile(s) and not _copy_auth_file(s, os.path.join(dst, "Default", rel)):
+        if os.path.isfile(s) and not _refresh_auth_file(s, os.path.join(dst, "Default", rel)):
             failed_dbs += os.path.basename(rel) in _SQLITE_AUTH_DBS
     return failed_dbs
 
