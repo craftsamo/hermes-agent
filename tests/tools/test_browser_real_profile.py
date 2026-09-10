@@ -275,6 +275,8 @@ class TestRealProfileCdpLaunch:
         captured = {}
 
         def fake_run(argv, **kw):
+            if "--version" in argv:  # headless user-agent probe, not the attach command
+                return proc
             captured["argv"] = argv
             captured["env"] = kw["env"]
             return proc

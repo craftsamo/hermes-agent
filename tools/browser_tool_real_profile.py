@@ -169,6 +169,43 @@ def _real_profile_snapshot_error(err: str) -> str:
     return f"{_RP}{err}"
 
 
+_UA_PLATFORMS = {
+    "darwin": "Macintosh; Intel Mac OS X 10_15_7",
+    "win32": "Windows NT 10.0; Win64; x64",
+}
+
+
+def _chrome_major_version(real_binary: str) -> Optional[str]:
+    """Major version the binary reports (``Brave Browser 152.1.94.121`` -> ``152``), else None."""
+    try:
+        proc = subprocess.run([real_binary, "--version"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    m = re.search(r"(\d+)\.\d+\.\d+", f"{proc.stdout or ''} {proc.stderr or ''}")
+    return m.group(1) if m else None
+
+
+def _headless_user_agent(real_binary: str) -> Optional[str]:
+    """Ordinary-Chrome UA for the headless launch; None when the version cannot be resolved.
+
+    New headless advertises ``HeadlessChrome/<v>``, and sites that gate on the UA STRING refuse it
+    even though the engine is perfectly current: WhatsApp Web answers a fully up-to-date headless
+    Chromium 152 with its "WhatsApp works with Google Chrome 100+ / update Chrome" page, which no
+    relaunch can clear. Advertise the same version under the ordinary ``Chrome/`` token instead.
+    The version is read from the binary itself, so a browser update never leaves a stale UA behind;
+    an unreadable version returns None and the launch keeps the native UA rather than lying about
+    which engine is running. Headless only — a headed window already sends the ordinary UA.
+    """
+    major = _chrome_major_version(real_binary)
+    if not major:
+        return None
+    platform = _UA_PLATFORMS.get(sys.platform, "X11; Linux x86_64")
+    return (f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{major}.0.0.0 Safari/537.36")
+
+
 def _launch_real_profile_chrome(
     real_binary: str, copy_dir: str, deadline=None
 ) -> Tuple[Optional[int], Optional[str]]:
@@ -180,6 +217,8 @@ def _launch_real_profile_chrome(
     Headless by default (a focus-stealing window defeats a background capability); Chrome's NEW
     headless shares the profile's cookie store (legacy --headless does not). browser.headed /
     AGENT_BROWSER_HEADED opts into a window, except on a display-less Linux host (launch would die).
+    A headless launch also overrides the ``HeadlessChrome/<v>`` user agent (see
+    ``_headless_user_agent``), which UA-gating sites reject outright.
     """
     _bt = _origin()
     deadline = time.monotonic() + _profile_remaining(deadline, 30.0)
@@ -191,6 +230,9 @@ def _launch_real_profile_chrome(
     _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not (_cloud._is_headed_mode() and (_has_display or not sys.platform.startswith("linux"))):
         chrome_argv.append("--headless=new")
+        user_agent = _headless_user_agent(real_binary)
+        if user_agent:
+            chrome_argv.append(f"--user-agent={user_agent}")
     try:
         chrome_proc = subprocess.Popen(chrome_argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        stdin=subprocess.DEVNULL, start_new_session=True, env=_bt._build_browser_env())
