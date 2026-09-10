@@ -259,6 +259,8 @@ class TestRealProfileCdpLaunch:
             (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n", encoding="utf-8")
             return FakeChrome()
 
+        proc = Mock(returncode=0, stdout="", stderr="")  # the UA probe's `--version`: unreadable
+
         with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
              patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)), \
@@ -268,6 +270,7 @@ class TestRealProfileCdpLaunch:
                           side_effect=[None, "http://127.0.0.1:41000"]), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
              patch.object(bt_session, "_popen_agent_browser", side_effect=fake_agent_browser_spawn), \
+             patch.object(bt.subprocess, "run", return_value=proc), \
              patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             bt_real_profile._real_profile_cdp()
@@ -313,6 +316,7 @@ class TestRealProfileCdpLaunch:
                           side_effect=lambda s: closed.__setitem__("n", closed["n"] + 1)), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
              patch.object(bt_real_profile, "_capture_agent_browser_cli", return_value=proc), \
+             patch.object(bt.subprocess, "run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             cdp, _err = bt_real_profile._real_profile_cdp()
         assert closed["n"] == 1  # stale wrong-dir session was closed
