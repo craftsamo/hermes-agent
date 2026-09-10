@@ -228,12 +228,37 @@ from tools import browser_tool_cloud as _cloud
 from tools import browser_tool_lightpanda_fallback as _lp
 
 
-# Single shared real-profile copy-browser session: concurrent tasks reuse it
-# instead of each launching a rival Chromium on the same copied user-data-dir.
-_REAL_PROFILE_SESSION = "hermes-real-profile"
+# One real-profile copy-browser session PER HERMES_HOME: concurrent tasks of a profile
+# reuse it instead of each launching a rival Chromium on the same copied user-data-dir,
+# while a different profile (its own copy dir, maybe its own pinned browser profile)
+# gets its own attach daemon. The daemon name doubles as its socket dir under the
+# shared tmpdir, so two hermes processes that share ONE name would each treat the
+# other's daemon as stale ("wrong data dir"), close it, and leave a daemon holding
+# a dead CDP port — the next call then hangs attaching to it.
+_REAL_PROFILE_SESSION = "hermes-real-profile"  # prefix; see _real_profile_session()
 _real_profile_cdp_lock = threading.Lock()
-_real_profile_cdp_cache: dict = {}
+_real_profile_cdp_cache: dict = {}  # session name -> HTTP CDP root
 _real_profile_chrome_procs: list = []  # Popen handles of directly-launched real browsers
+
+
+def _real_profile_session() -> str:
+    """Attach-daemon session name for the ACTIVE hermes home.
+
+    ``hermes-real-profile`` for the default home (unchanged on single-profile installs),
+    ``hermes-real-profile-<profile>`` under ``profiles/<name>``, and a short hash of the
+    resolved path for any other home. Follows the context-local ``HERMES_HOME`` override,
+    so under a multiplex gateway each profile's calls resolve to that profile's daemon.
+    """
+    import hashlib
+    from hermes_cli.profiles import get_active_profile_name
+    from hermes_constants import get_hermes_home
+    name = get_active_profile_name()
+    if name == "default":
+        return _REAL_PROFILE_SESSION
+    if name == "custom":
+        digest = hashlib.sha1(str(get_hermes_home().resolve()).encode("utf-8")).hexdigest()[:8]
+        return f"{_REAL_PROFILE_SESSION}-{digest}"
+    return f"{_REAL_PROFILE_SESSION}-{name}"
 
 
 

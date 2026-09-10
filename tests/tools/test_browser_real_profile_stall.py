@@ -150,7 +150,7 @@ def test_owned_browser_survives_agent_browser_metadata_loss(
             assert (cdp, error) == (surviving, None)
             attach.assert_called_once()
             assert attach.call_args.args[:2] == (server.server_port, str(copy))
-            assert bt._real_profile_cdp_cache["cdp"] == surviving
+            assert bt._real_profile_cdp_cache[bt._real_profile_session()] == surviving
         else:
             assert cdp is None and "Refusing to overwrite" in error
             attach.assert_not_called()
