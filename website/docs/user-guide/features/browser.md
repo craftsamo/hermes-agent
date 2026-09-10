@@ -199,6 +199,15 @@ same [headed-mode](#headed-mode-visible-browser-window) toggle applies —
 real-profile browsing too. On a display-less host (servers, CI) it always runs
 headless regardless.
 
+New headless normally advertises itself as `HeadlessChrome/<version>`, and some
+sites gate on that string alone — WhatsApp Web, for one, answers a perfectly
+current headless browser with its "WhatsApp works with Google Chrome 100+"
+update page. The headless launch therefore advertises the **same version** your
+browser actually reports, under the ordinary `Chrome/` token. Nothing else about
+the browser changes, and headed mode is untouched. Note that overriding the user
+agent also clears the User-Agent Client Hints brand list (`navigator.userAgentData.brands`
+comes back empty), which is the standard Chromium trade-off for this flag.
+
 If your browser has several profiles (say a work profile and a personal one)
 and you don't want "whichever profile you touched last" deciding the agent's
 identity, pin the snapshot source explicitly:
