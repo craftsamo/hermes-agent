@@ -99,3 +99,10 @@ class TestLaunchPurgesBeforeStartingChrome:
         assert seen["sessions_existed_at_launch"] is False
         assert (default / "Cookies").exists()  # the launch kept the login state
         self._reset()
+
+
+class TestSnapshotDoesNotCopyTabState:
+    def test_sessions_is_ignored_by_the_snapshot(self):
+        """The owner's open tabs are their browsing, not auth — never copy them in."""
+        import hermes_cli.browser_connect as bc
+        assert "Sessions" in bc._SNAPSHOT_IGNORES
