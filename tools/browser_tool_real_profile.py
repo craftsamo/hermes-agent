@@ -8,6 +8,7 @@ through ``_bt`` (resolved per call — never import ``tools.browser_tool`` at im
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -147,6 +148,32 @@ def _real_profile_snapshot_error(err: str) -> str:
     return f"{_RP}{err}"
 
 
+def _purge_session_restore_state(copy_dir: str) -> None:
+    """Drop Chromium's saved tab/window state so a launch starts with no restored tabs.
+
+    The copy is a LONG-LIVED directory reused by every launch, so Chromium's ordinary session
+    restore replays the previous run's tabs into the new one. Measured on Brave 152 headless:
+    the tabs come back after a graceful SIGTERM (``exit_type`` = ``Normal``) just as they do
+    after a SIGKILL, so this state — not the exit kind — is the only lever. Across relaunches
+    it compounds: an assistant profile reached 128 pages / 79 workers / 7.5 GB RSS, which
+    wedges ``Runtime.evaluate`` behind the renderer load and leaves the browser too busy to
+    answer SIGTERM. Restoring tabs has no value here anyway — every ``browser_exec`` call
+    drives the tab it opens or is attached to.
+
+    Only ``<profile>/Sessions`` is removed. Logins are unaffected: cookies live in ``Cookies``,
+    passwords in ``Login Data``, and site-side sessions (WhatsApp Web's linked device) in
+    ``IndexedDB``. Best-effort — a failure here must never block a launch.
+    """
+    try:
+        entries = os.listdir(copy_dir)
+    except OSError:
+        return
+    for name in entries:
+        sessions = os.path.join(copy_dir, name, "Sessions")
+        if os.path.isdir(sessions):
+            shutil.rmtree(sessions, ignore_errors=True)
+
+
 def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Optional[int], Optional[str]]:
     """Launch the user's REAL browser binary on the profile COPY; return (debug_port, error).
 
@@ -162,6 +189,7 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
         os.unlink(os.path.join(copy_dir, "DevToolsActivePort"))  # stale port confuses reuse probes
     except OSError:
         pass
+    _purge_session_restore_state(copy_dir)
     chrome_argv = [real_binary, f"--user-data-dir={copy_dir}", *_REAL_PROFILE_CHROME_FLAGS]
     _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not (_cloud._is_headed_mode() and (_has_display or not sys.platform.startswith("linux"))):
