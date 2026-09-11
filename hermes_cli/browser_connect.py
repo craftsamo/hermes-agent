@@ -330,6 +330,9 @@ _SNAPSHOT_IGNORES = (
     "OptimizationGuide*", "optimization_guide_model_store", "Safe Browsing", "SafetyTips",
     "OnDeviceHeadSuggestModel", "segmentation_platform", "Sync Data", "Shared Dictionary",
     "History*",         # large; not needed for auth
+    "Sessions",         # the user's open tabs; restoring their browsing into the agent's
+                        # copy is both a privacy leak and dead weight (see
+                        # tools.browser_tool_real_profile._purge_session_restore_state)
     "Favicons*",
     "Singleton*",       # live-instance symlinks; never valid in a copy
     "RunningChromeVersion", "SingletonSocket", "*.tmp",
