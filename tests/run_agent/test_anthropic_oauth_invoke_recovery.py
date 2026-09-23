@@ -165,6 +165,52 @@ def test_malformed_response_retries_as_required_without_thinking(oauth_agent):
     assert oauth_agent.session_output_tokens == 60
 
 
+@pytest.mark.parametrize(
+    ("model", "forced"),
+    [
+        ("claude-opus-5", True),
+        ("claude-fable-5", True),
+        ("claude-opus-5-5", False),
+        ("anthropic/claude-opus-5.5", False),
+        ("claude-fable-5-1", False),
+    ],
+)
+def test_recovery_forces_tool_use_only_where_the_model_accepts_it(oauth_agent, model, forced):
+    """Opus 5.5 and Fable 5.1 400 on tool_choice any/tool, so their retry resends the plain request."""
+    oauth_agent.model = model
+    responses = iter(
+        [
+            _text_response(MALFORMED, stop_reason="tool_use"),
+            _tool_response(),
+            _text_response("Done"),
+        ]
+    )
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return next(responses)
+
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch("model_tools.handle_function_call", return_value="search result"),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation("search")
+
+    assert result["completed"] is True
+    assert len(requests) == 3
+    if forced:
+        assert requests[1]["tool_choice"] == {"type": "any"}
+        assert "thinking" not in requests[1]
+    else:
+        assert requests[1]["tool_choice"] == requests[0]["tool_choice"] == {"type": "auto"}
+        assert requests[1]["thinking"] == requests[0]["thinking"]
+        assert requests[1].get("output_config") == requests[0].get("output_config")
+
+
 def test_resume_drops_malformed_assistant_before_request_shaping(oauth_agent):
     requests = []
 
