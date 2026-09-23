@@ -127,8 +127,12 @@ def build_api_request(
         api_kwargs = agent._build_api_kwargs(request_api_messages)
     else:
         api_kwargs = agent._build_api_kwargs(request_api_messages, tools_for_api=tools_for_api)
+    from agent.anthropic_adapter import _supports_forced_tool_choice
+    # A model that rejects forced tool use (Opus 5.5, Fable 5.1) also keeps thinking always on, so
+    # the recovery there is a plain resend of the ordinary request: forcing would 400 the retry.
     if (anthropic_oauth_invoke_recovery and agent.api_mode == "anthropic_messages"
-            and agent._is_anthropic_oauth and api_kwargs.get("tools")):
+            and agent._is_anthropic_oauth and api_kwargs.get("tools")
+            and _supports_forced_tool_choice(api_kwargs.get("model") or agent.model)):
         api_kwargs["tool_choice"] = {"type": "any"}
         for key in ("thinking", "output_config", "temperature"):
             api_kwargs.pop(key, None)

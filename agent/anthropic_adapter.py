@@ -659,6 +659,19 @@ def _thinking_kwargs(reasoning_config: Dict[str, Any], model: str, effective_max
 # OpenAI tool_choice -> Anthropic; any other string is a forced tool name.
 _TOOL_CHOICE_MAP = {None: {"type": "auto"}, "auto": {"type": "auto"}, "required": {"type": "any"}}
 
+# Families that answer a FORCED tool_choice ({"type": "any"} / {"type": "tool"}) with HTTP 400
+# although the rest of adaptive Claude accepts it: Anthropic documents it for Opus 5.5, Fable 5.1
+# and Mythos 5.1 (Fable 5 still accepts it). Dotted ids cover Portal / OpenRouter spellings.
+_NO_FORCED_TOOL_CHOICE_CLAUDE_SUBSTRINGS = (
+    "claude-opus-5-5", "claude-opus-5.5", "claude-fable-5-1", "claude-fable-5.1",
+    "claude-mythos-5-1", "claude-mythos-5.1",
+)
+
+
+def _supports_forced_tool_choice(model: str | None) -> bool:
+    """False when ``model`` rejects tool_choice ``any`` / ``tool``; only ``auto`` / ``none`` work."""
+    return not _model_matches(model or "", _NO_FORCED_TOOL_CHOICE_CLAUDE_SUBSTRINGS)
+
 
 def build_anthropic_kwargs(
     model: str, messages: List[Dict], tools: Optional[List[Dict]], max_tokens: Optional[int],
