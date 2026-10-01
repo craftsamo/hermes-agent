@@ -39,6 +39,7 @@ from agent.turn_retry_state import TurnRetryState
 # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
 # skewed phase mid-turn.
 from agent.anthropic_oauth_recovery import _MalformedAnthropicOAuthToolMarkup, handle_oauth_markup
+from agent.anthropic_oauth_replay import _sanitize_anthropic_oauth_replay_for_provider
 from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
@@ -1215,9 +1216,11 @@ def _peel_moa_guidance(messages: List[Dict[str, Any]], guidance: Any) -> List[Di
 def _redecorate_prompt_cache_for_provider(
     agent, api_messages: List[Dict[str, Any]], *, system_message=None,
     moa_prepared: Optional[Dict[str, Any]] = None, tools_for_api: Optional[List[Dict[str, Any]]] = None,
+    anthropic_oauth_replay_entries: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Strip and re-apply cache_control for the *current* provider policy — failover
-    ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased."""
+    ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased;
+    malformed OAuth replay is re-rendered for the current destination."""
     messages: List[Dict[str, Any]] = [dict(m) if isinstance(m, dict) else m for m in (api_messages or [])]
     prepared = moa_prepared
     guidance = prepared.get("guidance") if isinstance(prepared, dict) else None
@@ -1225,6 +1228,7 @@ def _redecorate_prompt_cache_for_provider(
         messages = _peel_moa_guidance(messages, guidance)
 
     strip_anthropic_cache_control(messages)
+    messages = _sanitize_anthropic_oauth_replay_for_provider(agent, messages, anthropic_oauth_replay_entries)
     planned_tools = strip_anthropic_tool_cache_control(
         tools_for_api if tools_for_api is not None else getattr(agent, "tools", [])
     )
@@ -1447,6 +1451,9 @@ class _LoopState:
     pending_moa_prepared_request: Any = None
     # Per-iteration slots.
     request_logger: Any = None
+    # Malformed OAuth replay provenance: source rows (prep) -> request entries (assembly).
+    _oauth_replay_targets: Any = None
+    _oauth_replay_entries: Any = None
     api_messages: Any = None
     tools_for_api: Any = None
     _moa_prepared_request: Any = None

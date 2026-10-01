@@ -16,6 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict
 
+from agent.anthropic_oauth_replay import _anthropic_oauth_replay_targets
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
 from agent.turn_context_compaction import _reanchor
@@ -108,6 +109,7 @@ class IterationPrep:
     messages: Any
     request_logger: Any
     current_turn_user_idx: Any
+    _oauth_replay_targets: Any = None
 
 
 def prepare_iteration(
@@ -196,6 +198,8 @@ def prepare_iteration(
         )
 
     messages = [msg for msg in messages if not _is_scaffold_ghost(msg)]
+    # Malformed OAuth replay is identified by finish metadata the repair merge below drops.
+    _oauth_replay_targets = _anthropic_oauth_replay_targets(messages)
 
     # Repair malformed role alternation (tool→user / user→user tails): providers
     # return empty content on them and the empty-retry loop spins. The _with_cursor
@@ -235,7 +239,7 @@ def prepare_iteration(
         current_turn_user_idx = _reanchored_idx
     return IterationPrep(
         action="fallthrough", messages=messages, request_logger=request_logger,
-        current_turn_user_idx=current_turn_user_idx,
+        current_turn_user_idx=current_turn_user_idx, _oauth_replay_targets=_oauth_replay_targets,
     )
 
 
