@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 
 from agent.error_classifier import FailoverReason
 from agent.agent_runtime_helpers import _INTERRUPTED_PLACEHOLDER
+from agent.anthropic_oauth_recovery import raise_if_malformed_oauth_response
 from agent.message_metadata import append_message
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.turn_failure_copy import site_copy, stamp_failure
@@ -87,6 +88,12 @@ def perform_api_call(
     _use_streaming = _should_stream(agent)
 
     def _perform_api_call(next_api_kwargs):
+        result = _send_api_call(next_api_kwargs)
+        # Raised inside the middleware executor so it sees a failure, never the leaked markup.
+        raise_if_malformed_oauth_response(agent, result)
+        return result
+
+    def _send_api_call(next_api_kwargs):
         if agent.api_mode == "codex_responses":
             next_api_kwargs = agent._get_transport().preflight_kwargs(
                 next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),

@@ -1722,8 +1722,13 @@ class SessionMessagesMixin:
         messages = _strip_stale_tool_call_markers(_strip_background_review_harness(messages))
         if repair_alternation and messages:
             from agent.agent_runtime_helpers import repair_message_sequence
+            from agent.anthropic_oauth_replay import (
+                _anthropic_oauth_replay_targets, _retain_anthropic_oauth_replay_provenance)
+            # The merge below hides a malformed OAuth turn's finish metadata; keep its provenance.
+            oauth_replay_targets = _anthropic_oauth_replay_targets(messages)
             repaired = repair_message_sequence(None, messages)
             if repaired:
+                _retain_anthropic_oauth_replay_provenance(messages, oauth_replay_targets)
                 logger.info("Repaired %d message-alternation violation(s) while "
                     "restoring session %s — durable transcript kept them, "
                     "see repair_message_sequence", repaired, session_id)

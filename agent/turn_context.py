@@ -1193,6 +1193,7 @@ def _sanitize_model_for(agent: Any, moa_config: Any) -> Any:
 def build_api_messages(
     agent: Any, messages: List[Dict[str, Any]], *, current_turn_user_idx: Any,
     ext_prefetch_cache: Any, plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
+    oauth_replay_targets: Any = None, oauth_replay_entries: Any = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Build the wire copy of ``messages`` for one API call plus the effective system
     message. Returns ``(api_messages, effective_system)``.
@@ -1205,6 +1206,7 @@ def build_api_messages(
     beyond the sidecar stamp, and the system prompt is built ONCE per session and
     replayed verbatim."""
     from agent.agent_runtime_helpers import fill_empty_non_final_wire_payload
+    from agent.anthropic_oauth_replay import _stamp_anthropic_oauth_replay_marker
     from agent.conversation_loop import _clone_message_for_send
     from agent.replay_cleanup import canonicalize_replay_history
 
@@ -1229,6 +1231,7 @@ def build_api_messages(
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
+        _stamp_anthropic_oauth_replay_marker(msg, api_msg, oauth_replay_targets, oauth_replay_entries)
         # api_content is bookkeeping (exact bytes sent), never a provider field — pop
         # it from EVERY outgoing copy. Persistence/display fields (display_*, _row_id,
         # timestamp) are local bookkeeping: strict OpenAI backends reject unknown keys
