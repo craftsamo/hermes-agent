@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent.proxy_bypass import is_loopback_host
+from hermes_cli import browser_connect_cookie_merge as _cookie_merge
 from hermes_cli import browser_connect_prep as _prep
 from hermes_constants import get_hermes_home
 
@@ -446,13 +447,14 @@ def _copy_auth_file(src_file: str, dst_file: str) -> str | None:
 
 def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> dict[str, str]:
     """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it);
-    returns ``{relative name: reason}`` for the DB auth files that could NOT be copied ({} = clean)."""
+    returns ``{relative name: reason}`` for the DB auth files that could NOT be copied ({} = clean).
+    An existing cookie store is merged row-wise rather than overwritten (``browser_connect_cookie_merge``)."""
     failed: dict[str, str] = {}
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
         if not os.path.isfile(s):
             continue
-        reason = _copy_auth_file(s, os.path.join(dst, "Default", rel))
+        reason = _cookie_merge.refresh_auth_file(s, os.path.join(dst, "Default", rel))
         if reason and os.path.basename(rel) in _SQLITE_AUTH_DBS:
             failed[rel] = reason
     return failed
