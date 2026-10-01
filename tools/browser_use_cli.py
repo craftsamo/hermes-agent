@@ -36,39 +36,54 @@ _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
 # the same human-control lease fence as the built-in browser tools. Popped before launching the CLI.
 _BOT_DESKTOP_BROWSER_SENTINEL = "_HERMES_BU_BOT_DESKTOP_BROWSER"
 
-# Prepended to the model's code for named sessions on SHARED browsers (a /browser connect CDP override): the
-# harness daemon attaches to the first existing page at startup, so two fresh named daemons can land on the
+# Prepended to the model's code for logical sessions on SHARED browsers (a /browser connect CDP override): the
+# harness daemon attaches to the first existing page at startup, so two fresh daemons can land on the
 # SAME tab. Steering each onto a tab it created prevents clobbering. Runs once per daemon (marker keyed by
-# BU_NAME + daemon pid).
+# BU_NAME, holding the daemon pid; in the private runtime when the call owns one — browser_use_cli_target).
 _OWN_TAB_PREAMBLE = """\
 # hermes: pin this named session to its own tab (once per daemon process)
 def _hermes_ensure_own_tab():
     import os as _os, tempfile as _tf
     _name = _os.environ.get("BU_NAME", "default")
+    _runtime = _os.environ.get("BH_RUNTIME_DIR")
+    _private = _runtime and _os.environ.get("BH_RUNTIME_DIR_SHARED") != "1"
     try:
         # Key the marker by the daemon's pid so a daemon restart (which
         # re-attaches to the first shared page) re-pins automatically,
         # while agent-driven tab switches mid-session are left alone.
-        from browser_harness import _ipc as _bipc
-        _dpid = _bipc.pid_path(_name).read_text().strip() or "0"
+        if _private:
+            # Owned per-instance runtimes use bu.pid, not bu-<name>.pid.
+            with open(_os.path.join(_runtime, "bu.pid"), encoding="utf-8") as _f:
+                _dpid = _f.read().strip()
+        else:
+            from browser_harness import _ipc as _bipc
+            _dpid = _bipc.pid_path(_name).read_text(encoding="utf-8").strip()
+        if not _dpid.isdecimal() or int(_dpid) <= 0:
+            raise ValueError("invalid daemon PID")
     except Exception:
-        _dpid = "0"
+        raise RuntimeError("Cannot identify browser daemon for tab isolation") from None
     _uid = _os.getuid() if hasattr(_os, "getuid") else 0
     _marker = _os.path.join(
-        _tf.gettempdir(), "hermes-bu-owntab-%s-%s-%s" % (_uid, _name, _dpid)
+        _runtime if _private else _tf.gettempdir(), "hermes-bu-owntab-%s-%s" % (_uid, _name)
     )
-    if _os.path.exists(_marker):
-        return
+    try:
+        with open(_marker, encoding="utf-8") as _f:
+            if _f.read() == _dpid:
+                return
+    except OSError:
+        pass
     try:
         # Force a fresh target: new_tab() would REUSE a blank current tab,
         # which is exactly the tab a sibling daemon may also hold.
         _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
-        if _tid:
-            switch_tab(_tid)
+        if not _tid:
+            return
+        switch_tab(_tid)
     except Exception:
-        pass  # best-effort: worst case is pre-fix behavior
+        return  # best-effort, but do not cache a failed tab switch
     try:
-        open(_marker, "w").close()
+        with open(_marker, "w", encoding="utf-8") as _f:
+            _f.write(_dpid)
     except OSError:
         pass
 _hermes_ensure_own_tab()
@@ -460,9 +475,9 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
         f"Cloud browser provider {provider_name} returned no CDP endpoint, so Browser Use mode "
         "cannot drive it. Switch to the built-in browser tools for this provider.",
     )
-    # A provider browser keyed bu-named-<name> is exclusive to this session — the
-    # own-tab preamble would just leak a blank tab into it.
-    if err is None and session_name:
+    # Provider browsers are exclusive to their named-session or task cache key — the
+    # own-tab preamble would just leak a blank tab into them.
+    if err is None:
         env[_PRIVATE_BROWSER_SENTINEL] = "1"
     return err
 
@@ -568,21 +583,27 @@ def _kill_cli_process_group(proc) -> None:
         os.killpg(proc.pid, signal.SIGKILL)  # windows-footgun: ok — POSIX only, the nt branch returned above
 
 
-def _run_cli_killing_process_group(cmd, code, env, timeout):
+def _run_cli_killing_process_group(cmd, code, env, timeout, *, on_spawn=None, pass_fds=()):
     """Run the CLI in its own process group and kill the whole group on timeout.
 
     ``subprocess.run`` only kills the direct child on ``TimeoutExpired``; a grandchild that
     inherited the stdout/stderr pipes (browser_harness daemon / Chrome helper) is orphaned
     still holding them, and on Windows ``run()``'s unbounded post-kill ``communicate()`` then
     blocks on pipe EOF forever — so the tool call, plus its activity heartbeat, wedges (#106244).
+    ``on_spawn(proc)`` runs before any input is sent and ``pass_fds`` are inherited (POSIX): the
+    owned-target lifecycle (``browser_use_cli_target``) records its launcher lease through them.
     """
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", env=env, **_group_popen_kwargs(),
+        **({"pass_fds": pass_fds} if pass_fds else {}),
     )
     try:
+        if on_spawn is not None:
+            on_spawn(proc)
         stdout, stderr = proc.communicate(input=code, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except BaseException:
+        # A timeout, or a launcher that could not be recorded: never leave the group running.
         _kill_cli_process_group(proc)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.communicate(timeout=_POST_KILL_DRAIN_S)
@@ -613,6 +634,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                           "Run `hermes update` to re-sync it.")
 
     env = _base_subprocess_env()
+    env.pop("BU_NAME", None)  # an inherited name would steer the harness to a daemon this call does not own
     if session:
         if not _SESSION_RE.match(session):
             return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
@@ -621,13 +643,16 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     with preparation_budget(deadline=deadline):
         route_err = _route_backend(env, session, task_id, bool(local))
     if route_err:
-        return tool_error(route_err)
+        from tools.browser_use_cli_target import redact
+        return tool_error(redact(route_err, [env.get("BU_CDP_WS"), env.get("BU_CDP_URL"),
+                                             os.getenv("BROWSER_CDP_URL"), _read_browser_cfg().get("cdp_url")]))
     bot_desktop_browser = bool(env.pop(_BOT_DESKTOP_BROWSER_SENTINEL, None))
 
-    # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
-    # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
+    # SHARED browser (/browser connect CDP override): pin each logical session — every CDP call runs
+    # in its own owned daemon — to its own tab (see _OWN_TAB_PREAMBLE). Private per-key browsers skip
+    # this — nothing to collide with.
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
-    if session and not private_browser:
+    if (session or _has_cdp_env(env)) and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
 
     workspace = _workspace_dir(task_id)
@@ -647,6 +672,10 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(cmd, timeout)
+            if _has_cdp_env(env):
+                # Bind the run to a Hermes-owned daemon verified on THIS endpoint (browser_use_cli_target).
+                from tools.browser_use_cli_target import dispatch_targeted
+                return dispatch_targeted(cmd, code, env, session, task_id, remaining)
             return {"proc": _run_cli_killing_process_group(cmd, code, env, remaining)}
         except subprocess.TimeoutExpired:
             return {"error_result": tool_error(

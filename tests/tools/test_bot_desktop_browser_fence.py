@@ -56,6 +56,9 @@ def _wire_browser_exec(monkeypatch, run_cli):
         "success": True, "data": {"cdpUrl": "http://127.0.0.1:9222"}})
     monkeypatch.setattr(browser_use, "_attach_vault_supervisor", lambda *a: None)
     monkeypatch.setattr(browser_use, "_run_cli_killing_process_group", run_cli)
+    # The CDP route runs through the owned-daemon lifecycle; keep its execution on the same seam.
+    monkeypatch.setattr("tools.browser_use_cli_target.run_targeted",
+                        lambda cmd, code, env, session, task_id, timeout: run_cli(cmd, code, env, timeout))
     return browser_use
 
 

@@ -52,6 +52,15 @@ def test_browser_exec_child_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("BROWSERBASE_API_KEY", "browser-key")
     monkeypatch.setenv("KEEP_BROWSER_PROBE", "kept")
     monkeypatch.delenv("ANONYMIZED_TELEMETRY", raising=False)
+    # The probe is not a harness daemon: hand the CDP route's owned-daemon lifecycle (covered by
+    # test_browser_use_target_scope.py) straight to the facade's runner, recording what it was given.
+    lifecycle = []
+
+    def run_targeted(cmd, code, env, session, task_id, timeout):
+        lifecycle.append((session, task_id))
+        return bu._run_cli_killing_process_group(cmd, code, env, timeout)
+
+    monkeypatch.setattr("tools.browser_use_cli_target.run_targeted", run_targeted)
     result = json.loads(bu.browser_exec("print('payload')", session="research", task_id="owner"))
     assert result["success"], result
     child = json.loads(result["output"])
@@ -59,7 +68,7 @@ def test_browser_exec_child_environment(tmp_path, monkeypatch):
     for key in ("PYTHONHOME", "OPENAI_API_KEY", "_HERMES_BU_PRIVATE_BROWSER"):
         assert key not in child["env"]
     assert child["env"].get("PYTHONPATH") == bu._harness_site_dir()
-    assert child["env"]["BU_NAME"] == "research"
+    assert lifecycle == [("research", "owner")]
     assert child["env"]["BU_CDP_WS"] == "ws://127.0.0.1:47000/private"
     assert child["env"]["ANONYMIZED_TELEMETRY"] == "false"
     assert child["env"]["BROWSERBASE_API_KEY"] == "browser-key"
