@@ -38,6 +38,7 @@ from hermes_cli.observability.shared_metrics_efficiency import record_cache_brea
 from agent.turn_retry_state import TurnRetryState
 # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
 # skewed phase mid-turn.
+from agent.anthropic_oauth_recovery import _MalformedAnthropicOAuthToolMarkup, handle_oauth_markup
 from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
@@ -1424,6 +1425,9 @@ class _LoopState:
     restart_count: int = 0
     _outer_error_count: int = 0  # outer-loop exceptions this turn (#92450), see _MAX_OUTER_LOOP_ERRORS
     truncated_tool_call_retries: int = 0
+    # Leaked OAuth invoke-markup recovery for the current API call (see anthropic_oauth_recovery).
+    anthropic_oauth_invoke_retries: int = 0
+    anthropic_oauth_invoke_recovery: bool = False
     truncated_response_parts: List[tuple[str, bool]] = field(default_factory=list)
     compression_attempts: int = 0
     _last_preflight_pressure: Optional[int] = None
@@ -1503,6 +1507,7 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
 
     Returns a turn result dict when a phase ends the turn, else None once the loop is left
     (success, a restart armed on ``s._retry``, interrupt, or retries exhausted)."""
+    s.anthropic_oauth_invoke_retries, s.anthropic_oauth_invoke_recovery = 0, False
     while s.retry_count < s.max_retries:
         _ng = _run_phase(nous_rate_limit_guard, agent, s)
         if _ng.action == "return":
@@ -1517,6 +1522,12 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
             if _rc.action == "return":
                 return _rc.result
             if _rc.action == "break":
+                return None
+        except _MalformedAnthropicOAuthToolMarkup as malformed:
+            _om = _run_phase(handle_oauth_markup, agent, s, malformed=malformed)
+            if _om.action == "return":
+                return _om.result
+            if _om.action == "break":
                 return None
         except InterruptedError:
             if _run_phase(handle_api_interrupt, agent, s).action == "break":

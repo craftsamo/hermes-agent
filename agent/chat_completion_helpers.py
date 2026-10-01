@@ -3472,6 +3472,12 @@ class _StreamingCall(StreamingWaitMonitor):
         per-request ``request_client`` so the watchdog can abort this socket
         without closing the shared client mid-flight."""
         has_tool_use = False
+        from agent.anthropic_oauth_stream import AnthropicOAuthStreamQuarantine
+        # OAuth may leak a tool call as invoke text; hold it until the final message is judged.
+        quarantine = AnthropicOAuthStreamQuarantine(
+            {"tool": self._emit_tool_started, "text": self._emit_text, "reasoning": self._emit_reasoning},
+            enabled=bool(getattr(self.agent, "_is_anthropic_oauth", False)),
+        )
         # No message_stop -> EmptyStreamError; saw_stream_event only picks the message.
         saw_stream_event = False
         saw_message_stop = False
@@ -3524,7 +3530,7 @@ class _StreamingCall(StreamingWaitMonitor):
                     if block and getattr(block, "type", None) == "tool_use":
                         has_tool_use = True
                         if getattr(block, "name", None):
-                            self._emit_tool_started(block.name)
+                            quarantine.deliver("tool", block.name)
                             # Same as the chat_completions wire: a stream that dies inside the
                             # tool args is retried (no tool has run yet) instead of stubbed.
                             self.result["partial_tool_names"].append(block.name)
@@ -3534,9 +3540,9 @@ class _StreamingCall(StreamingWaitMonitor):
                     if delta_type == "text_delta":
                         text = getattr(delta, "text", "")
                         if text and not has_tool_use:
-                            self._emit_text(text)
+                            quarantine.deliver("text", text)
                     elif delta_type == "thinking_delta" and getattr(delta, "thinking", ""):
-                        self._emit_reasoning(delta.thinking)
+                        quarantine.deliver("reasoning", delta.thinking)
             raw_stream = _stream_context["stream"]
             if not self.agent._interrupt_requested and raw_stream is not None:
                 if not saw_message_stop:
@@ -3562,9 +3568,12 @@ class _StreamingCall(StreamingWaitMonitor):
             return None
         if base_final_message is not None:
             self._check_anthropic_message(base_final_message, tool_drop=False)
-            if not stream.output_modified:
-                return self._check_anthropic_message(base_final_message)
-        return self._check_anthropic_message(accumulator.response(base_final_message))
+        final_message = self._check_anthropic_message(
+            base_final_message if base_final_message is not None and not stream.output_modified
+            else accumulator.response(base_final_message)
+        )
+        quarantine.finish(final_message, lambda: self._writer_still_current("Anthropic streaming"))
+        return final_message
 
     # ── retry loop ──────────────────────────────────────────────────────
 
