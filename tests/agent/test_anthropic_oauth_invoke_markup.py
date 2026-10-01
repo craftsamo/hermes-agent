@@ -2,7 +2,13 @@
 
 from types import SimpleNamespace
 
-from agent.anthropic_oauth_markup import anthropic_oauth_response_has_invoke_markup
+from agent.anthropic_adapter import build_anthropic_kwargs
+from agent.anthropic_oauth_markup import (
+    anthropic_oauth_message_has_invoke_markup,
+    anthropic_oauth_message_invoke_payloads,
+    anthropic_oauth_response_has_invoke_markup,
+    remove_anthropic_oauth_invoke_payloads,
+)
 
 
 MALFORMED = (
@@ -11,6 +17,17 @@ MALFORMED = (
     '<parameter name="title">test</parameter>\n'
     "</invoke>"
 )
+
+
+def _tool():
+    return {
+        "type": "function",
+        "function": {
+            "name": "kanban_create",
+            "description": "create a task",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
 
 
 def test_detects_raw_oauth_invoke_response():
@@ -34,6 +51,22 @@ def test_detects_incomplete_oauth_invoke_tail():
     )
 
     assert anthropic_oauth_response_has_invoke_markup(response) is True
+
+
+def test_single_line_invoke_payload_preserves_following_text():
+    content = '<invoke name="mcp__kanban_create"></invoke>\nNormal explanation'
+    message = {
+        "role": "assistant",
+        "content": content,
+        "finish_reason": "tool_calls",
+    }
+
+    payloads = anthropic_oauth_message_invoke_payloads(message)
+    cleaned = remove_anthropic_oauth_invoke_payloads(message, set(payloads))
+
+    assert payloads == ('<invoke name="mcp__kanban_create"></invoke>',)
+    assert cleaned is not None
+    assert cleaned["content"] == "Normal explanation"
 
 
 def test_preserves_end_turn_examples_and_structured_tool_use():
@@ -80,3 +113,49 @@ def test_preserves_fenced_and_non_oauth_examples():
 
     assert anthropic_oauth_response_has_invoke_markup(fenced) is False
     assert anthropic_oauth_response_has_invoke_markup(bare_name) is False
+
+
+def test_inspects_all_assistant_replay_carriers_but_not_user_content():
+    assert anthropic_oauth_message_has_invoke_markup(
+        {"role": "assistant", "content": MALFORMED, "finish_reason": "tool_calls"}
+    )
+    assert anthropic_oauth_message_has_invoke_markup(
+        {
+            "role": "assistant",
+            "content": "clean",
+            "api_content": MALFORMED,
+            "finish_reason": "tool_calls",
+        }
+    )
+    assert anthropic_oauth_message_has_invoke_markup(
+        {
+            "role": "assistant",
+            "content": "clean",
+            "finish_reason": "tool_calls",
+            "anthropic_content_blocks": [
+                {"type": "text", "text": MALFORMED},
+            ],
+        }
+    )
+    assert not anthropic_oauth_message_has_invoke_markup(
+        {"role": "user", "content": MALFORMED}
+    )
+    assert not anthropic_oauth_message_has_invoke_markup(
+        {"role": "assistant", "content": MALFORMED, "finish_reason": "stop"}
+    )
+
+
+def test_non_oauth_replay_is_unchanged():
+    kwargs = build_anthropic_kwargs(
+        model="claude-sonnet-4-6",
+        messages=[
+            {"role": "user", "content": "make a task"},
+            {"role": "assistant", "content": MALFORMED},
+        ],
+        tools=[_tool()],
+        max_tokens=4096,
+        reasoning_config=None,
+        is_oauth=False,
+    )
+
+    assert "<invoke" in repr(kwargs["messages"])
