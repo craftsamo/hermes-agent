@@ -7,7 +7,7 @@ thinking off is trying to stop paying for.  The disable has to be sent:
 
     thinking: {"type": "disabled"}
 
-Reasoning-mandatory families (claude-fable) reject that with an HTTP 400
+Reasoning-mandatory families (claude-fable, claude-opus-5-5) reject that with an HTTP 400
 ("Thinking is mandatory for this model"), so they keep the omission — a
 silently-ignored disable is a much better failure than a dead turn.
 
@@ -30,6 +30,14 @@ MESSAGES = [{"role": "user", "content": "hello"}]
 ADAPTIVE_DISABLEABLE = [
     "anthropic/claude-opus-5",
     "claude-opus-4-6",
+]
+
+# Families whose thinking cannot be switched off, in both spellings.
+THINKING_MANDATORY = [
+    "anthropic/claude-fable-5",
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "anthropic/claude-opus-5.5",
 ]
 
 
@@ -59,9 +67,10 @@ class TestThinkingOffIsSentExplicitly:
         assert kwargs["thinking"] == {"type": "disabled"}
         assert "output_config" not in kwargs
 
-    def test_mandatory_thinking_models_keep_the_omission(self) -> None:
-        """claude-fable answers a disable with HTTP 400, so don't send one."""
-        kwargs = _kwargs("anthropic/claude-fable-5", {"enabled": False})
+    @pytest.mark.parametrize("model", THINKING_MANDATORY)
+    def test_mandatory_thinking_models_keep_the_omission(self, model: str) -> None:
+        """These answer a disable with HTTP 400, so don't send one."""
+        kwargs = _kwargs(model, {"enabled": False})
         assert "thinking" not in kwargs
 
     def test_legacy_manual_thinking_models_keep_the_omission(self) -> None:
@@ -111,6 +120,19 @@ class TestEnablePathIsUnchanged:
 class TestDisableVerdictHelper:
     """``_accepts_thinking_disable`` is the single source of the verdict."""
 
+
+    @pytest.mark.parametrize("model", THINKING_MANDATORY)
+    def test_mandatory_families_reject_the_disable(self, model: str) -> None:
+        from agent.anthropic_adapter import _accepts_thinking_disable
+
+        assert _accepts_thinking_disable(model) is False
+
+    def test_opus_5_5_does_not_drag_opus_5_along(self) -> None:
+        """The family match is a substring; Opus 5 must stay disableable."""
+        from agent.anthropic_adapter import _accepts_thinking_disable
+
+        assert _accepts_thinking_disable("claude-opus-5") is True
+        assert _accepts_thinking_disable("anthropic/claude-opus-5") is True
 
     def test_non_claude_models_are_left_alone(self) -> None:
         from agent.anthropic_adapter import _accepts_thinking_disable
