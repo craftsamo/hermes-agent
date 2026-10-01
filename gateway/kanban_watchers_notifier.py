@@ -640,13 +640,17 @@ class _KanbanNotification:
         # (#60600 rows) — fall back to that, then to "group" (the historical default that suits the
         # dashboard/group flows). handle_message() get_or_create_session's the target, so a mismatch only
         # ever degrades to a fresh session, never an exception.
-        _delivery_meta = sub.get("delivery_metadata") or {}
+        _delivery_meta = sub.get("delivery_metadata")
+        if not isinstance(_delivery_meta, dict):
+            _delivery_meta = {}
         _chat_type = str(sub.get("chat_type") or _delivery_meta.get("chat_type") or "").strip()
+        # The saved Telegram reply anchor keeps resumed replies in the originating private topic.
+        _message_id = str(_delivery_meta.get("telegram_reply_to_message_id") or "").strip() or None
         _source = SessionSource(
             platform=self.plat, chat_id=sub["chat_id"], chat_type=_chat_type or "group",
             thread_id=sub.get("thread_id") or None, user_id=sub.get("user_id"), user_id_alt=sub.get("user_id_alt"),
             profile=self.sub_profile or None, scope_id=_wake_scope_id(self.adapter, sub),
-            parent_chat_id=_delivery_meta.get("parent_chat_id"),
+            parent_chat_id=_delivery_meta.get("parent_chat_id"), message_id=_message_id,
         )
         _source._transport_adapter_ref = weakref.ref(self.adapter)
         from gateway.run import _async_profile_runtime_scope
