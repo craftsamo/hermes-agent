@@ -416,6 +416,65 @@ def test_resume_preserves_assistant_merged_after_malformed_turn(oauth_agent):
     assert "call_keep" in wire
 
 
+def _without_cache_control(value):
+    if isinstance(value, dict):
+        return {k: _without_cache_control(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_control(v) for v in value]
+    return value
+
+
+def test_merged_malformed_replay_stays_omitted_across_tool_iterations(oauth_agent):
+    """Role repair folds the malformed row into the native tool row, which then carries
+    ``tool_calls``; the next iteration must still omit the payload, byte-identically."""
+    oauth_agent._use_prompt_caching = True
+    responses = iter([_tool_response(), _text_response("Done")])
+    requests = []
+
+    def _call(kwargs):
+        requests.append(copy.deepcopy(kwargs))
+        return next(responses)
+
+    history = [
+        {"role": "user", "content": "make a task"},
+        {"role": "assistant", "content": MALFORMED, "finish_reason": "tool_calls"},
+        {
+            "role": "assistant",
+            "content": "Preserve this assistant context.",
+            "tool_calls": [
+                {
+                    "id": "call_keep",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": '{"query":"kept"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_keep", "name": "web_search", "content": "kept result"},
+    ]
+    with (
+        patch.object(oauth_agent, "_interruptible_api_call", side_effect=_call),
+        patch("model_tools.handle_function_call", return_value="search result"),
+        patch.object(oauth_agent, "_persist_session"),
+        patch.object(oauth_agent, "_save_trajectory"),
+        patch.object(oauth_agent, "_cleanup_task_resources"),
+    ):
+        result = oauth_agent.run_conversation("continue", conversation_history=history)
+
+    assert result["completed"] is True
+    assert len(requests) == 2
+    first, second = (_without_cache_control(r["messages"]) for r in requests)
+    for wire in (repr(first), repr(second)):
+        assert "<invoke" not in wire
+        assert "Preserve this assistant context." in wire
+        assert "call_keep" in wire
+        assert "_anthropic_oauth" not in wire
+    assert any("cache_control" in repr(r["messages"]) for r in requests)
+    # The second request replays the first verbatim (cached prefix) and appends this turn's round.
+    assert second[: len(first)] == first
+    # Durable history keeps the original text.
+    assert "<invoke" in repr(result["messages"])
+
+
 def test_resume_drops_malformed_turn_that_supersedes_a_verification_candidate(oauth_agent):
     """Role repair keeps the LATER row when the earlier one is a provisional verification
     candidate; the malformed payload must follow whichever row survives."""
