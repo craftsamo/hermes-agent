@@ -13,6 +13,7 @@ import sys
 import time
 from typing import Optional, Tuple
 from agent.proxy_bypass import loopback_request_kwargs
+from hermes_cli import browser_connect_prep as _prep
 from tools.browser_tool_origin import origin_module as _origin
 from tools import browser_tool_cloud as _cloud
 from tools import browser_tool_install as _install
@@ -34,7 +35,7 @@ def _terminate_real_profile_chrome() -> None:
 def _cdp_http_ready(http_cdp: str) -> bool:
     """True when an ``http://host:port`` CDP discovery root answers."""
     from tools.browser_lightpanda import _cdp_ready
-    return _cdp_ready(http_cdp, timeout=1.0)
+    return _cdp_ready(http_cdp, timeout=_prep.remaining(1.0))
 
 
 def _real_profile_daemon_env() -> dict:
@@ -56,9 +57,10 @@ def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str) -> 
         browser_cmd = _install._find_agent_browser()
     except FileNotFoundError:
         return None
+    timeout = _prep.remaining(15.0)
     try:
         return subprocess.run([*_session._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                               env=_real_profile_daemon_env(), stdin=subprocess.DEVNULL)
     except (subprocess.SubprocessError, OSError) as e:
         _bt.logger.debug("real-profile %s failed: %s", log_label, e)
@@ -93,9 +95,10 @@ def _surviving_chrome_cdp(data_dir: str) -> Optional[str]:
     if not port.isdigit() or not browser_path.startswith("/devtools/browser/"):
         return None
     http_cdp = f"http://127.0.0.1:{port}"
+    timeout = _prep.remaining(2.0)
     try:
         import requests
-        ws_url = str(requests.get(f"{http_cdp}/json/version", timeout=2, **loopback_request_kwargs(http_cdp))
+        ws_url = str(requests.get(f"{http_cdp}/json/version", timeout=timeout, **loopback_request_kwargs(http_cdp))
                      .json().get("webSocketDebuggerUrl") or "")
     except Exception:
         return None
@@ -160,6 +163,7 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
     AGENT_BROWSER_HEADED opts into a window, except on a display-less Linux host (launch would die).
     """
     _bt = _origin()
+    deadline = time.monotonic() + _prep.remaining(30.0)
     try:
         os.unlink(os.path.join(copy_dir, "DevToolsActivePort"))  # stale port confuses reuse probes
     except OSError:
@@ -177,7 +181,6 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
         return None, f"{_RP}the launch failed: {e}"
     _bt._real_profile_chrome_procs.append(chrome_proc)
 
-    deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         line = _read_devtools_port(copy_dir) or ""
         if line.isdigit():
@@ -203,9 +206,10 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
         return None, f"{_RP}the local browser engine (agent-browser) is not installed: {e}"
     argv = [*_session._agent_browser_argv(browser_cmd), "--session", _bt._REAL_PROFILE_SESSION,
             "--cdp", str(port), "open", "about:blank"]
+    timeout = _prep.remaining(_bt._get_open_command_timeout(first_open=True))
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=_bt._get_open_command_timeout(first_open=True), env=_real_profile_daemon_env(),
+                              timeout=timeout, env=_real_profile_daemon_env(),
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, _RP + "the real-profile browser took too long to start. Retry, or turn the toggle off."
@@ -230,6 +234,9 @@ def _real_profile_cdp() -> tuple:
     non-default dir, so it sidesteps the Chrome >=136 default-profile remote-debugging block and
     never contends with the user's running browser. One shared agent-browser session is reused
     across calls (cached, re-validated). ``(None, message)`` fail-closed; ``(None, None)`` when consent is off.
+    Lock wait and preparation spend from the caller's preparation budget
+    (``hermes_cli.browser_connect_prep``) — ``browser_exec`` opens one per call — so a stalled
+    preparation can neither outlive the tool call nor queue every later call behind its lock.
     """
     _bt = _origin()
     if not _cloud._use_real_profile():
@@ -252,7 +259,13 @@ def _real_profile_cdp() -> tuple:
     from hermes_cli.browser_connect import (detect_default_chromium, real_profile_copy_dir,
                                             real_profile_executable, snapshot_real_profile)
 
-    with _bt._real_profile_cdp_lock:
+    try:
+        wait = _prep.remaining(30.0)
+    except _prep.PreparationTimeout as e:
+        return None, f"{_RP}{e}"
+    if not _bt._real_profile_cdp_lock.acquire(timeout=wait):
+        return None, _RP + "timed out waiting for another real-profile browser preparation. Retry later."
+    try:
         cached = _bt._real_profile_cdp_cache.get("cdp")
         if cached and _cdp_http_ready(cached):
             # Re-claim the shared daemon's socket dir so the orphan reaper's idle clock sees
@@ -279,7 +292,9 @@ def _real_profile_cdp() -> tuple:
         # A Chrome from an earlier hermes process can still hold the copy dir after its attach
         # daemon was reaped (that owner died). Re-attach to it rather than overlay a live profile;
         # if the daemon cannot attach, fail closed — never snapshot over an open profile. Not ours
-        # to terminate (no Popen handle): it lives until the user closes it, by design.
+        # to terminate (no Popen handle): it lives until the user closes it, by design. A holder that
+        # cannot be verified here (DevToolsActivePort missing or recycled) is refused by the
+        # snapshot's own in-use guard rather than overlaid.
         surviving = _surviving_chrome_cdp(copy_dir)
         if surviving:
             cdp, err = _attach_agent_browser_to_real_profile(int(surviving.rsplit(":", 1)[1]), copy_dir)
@@ -308,3 +323,7 @@ def _real_profile_cdp() -> tuple:
         _bt._real_profile_cdp_cache["cdp"] = cdp
         _bt.logger.info("real-profile browser ready for %s at %s (%s)", browser, cdp, copy_dir)
         return cdp, None
+    except _prep.PreparationTimeout as e:
+        return None, f"{_RP}{e}"
+    finally:
+        _bt._real_profile_cdp_lock.release()
