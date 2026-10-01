@@ -13,6 +13,10 @@ from dataclasses import dataclass
 import logging
 from typing import Any
 
+from agent.anthropic_oauth_replay import (
+    _reattach_anthropic_oauth_replay_markers, _sanitize_anthropic_oauth_replay_for_provider,
+    _snapshot_anthropic_oauth_replay_originals,
+)
 from agent.message_sanitization import _sanitize_messages_surrogates
 from agent.usage_anchor import anchored_context_tokens
 from agent.prompt_caching import build_prompt_cache_plan, effective_cache_ttl
@@ -35,6 +39,7 @@ class AssembledRequest:
     approx_tokens: Any
     request_pressure_tokens: Any
     total_chars: Any
+    _oauth_replay_entries: Any = None
 
 
 def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original_user_message: Any) -> None:
@@ -107,6 +112,7 @@ def assemble_api_request(
     agent: Any, *, messages: Any, current_turn_user_idx: Any, _ext_prefetch_cache: Any,
     _plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
     original_user_message: Any, pending_moa_prepared_request: Any, request_logger: Any,
+    _oauth_replay_targets: Any = None,
 ) -> AssembledRequest:
     """Assemble the request in the original order. ORDER IS LOAD-BEARING: cache breakpoints
     are injected only after whitespace normalization, the orphan sweep, thinking-only drop /
@@ -117,10 +123,12 @@ def assemble_api_request(
     )
     from agent.model_metadata import estimate_messages_tokens_rough
 
+    _oauth_replay_entries: dict = {}
     api_messages, effective_system = build_api_messages(
         agent, messages, current_turn_user_idx=current_turn_user_idx,
         ext_prefetch_cache=_ext_prefetch_cache, plugin_user_context=_plugin_user_context,
         moa_config=moa_config, active_system_prompt=active_system_prompt,
+        oauth_replay_targets=_oauth_replay_targets, oauth_replay_entries=_oauth_replay_entries,
     )
 
     if moa_config:
@@ -142,6 +150,7 @@ def assemble_api_request(
     api_messages = _apply_context_engine_selection(
         agent, api_messages, messages, _sel_incoming, logger=request_logger
     )
+    _reattach_anthropic_oauth_replay_markers(api_messages, _oauth_replay_entries)
 
     # Runs unconditionally (not gated on context_compressor) so orphaned tool
     # results from session loading or manual message edits are always caught.
@@ -186,6 +195,10 @@ def assemble_api_request(
     # Strip lone surrogates (U+D800-U+DFFF) that some Ollama-served models emit;
     # they crash json.dumps() inside the OpenAI SDK and trigger the 3-retry cycle.
     _sanitize_messages_surrogates(api_messages)
+    # Malformed OAuth replay leaves the request copy here, after every transcript transform and
+    # before cache planning (see anthropic_oauth_replay for the provenance chain).
+    _oauth_replay_entries = _snapshot_anthropic_oauth_replay_originals(api_messages, _oauth_replay_entries)
+    api_messages = _sanitize_anthropic_oauth_replay_for_provider(agent, api_messages, _oauth_replay_entries)
 
     # No send-time pad loop here: ``repair_empty_non_final_messages`` (inside
     # ``_sanitize_api_messages``) is the single owner of empty-turn repair.
@@ -263,4 +276,5 @@ def assemble_api_request(
     return AssembledRequest(
         "fallthrough", api_messages, tools_for_api, _moa_prepared_request,
         pending_moa_prepared_request, approx_tokens, request_pressure_tokens, approx_tokens * 4,
+        _oauth_replay_entries,
     )

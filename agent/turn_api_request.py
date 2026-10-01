@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from agent.anthropic_oauth_recovery import apply_oauth_recovery_tool_choice
+from agent.anthropic_oauth_replay import strip_anthropic_oauth_replay_markers
 from agent.message_sanitization import sanitize_outbound_kwargs, strip_images_for_rejecting_model
 from hermes_cli.observability.shared_metrics_efficiency import observe_request_tools
 from utils import env_var_enabled
@@ -96,6 +97,7 @@ def build_api_request(
     system_message: Any, messages: Any, original_user_message: Any, approx_tokens: Any,
     total_chars: Any, retry_count: Any, api_call_count: Any, api_request_id: Any,
     api_start_time: Any, effective_task_id: Any, turn_id: Any, anthropic_oauth_invoke_recovery: bool = False,
+    _oauth_replay_entries: Any = None,
 ) -> ApiRequestBuild:
     """Assemble the attempt's request in the original order (every mutation happens BEFORE
     middleware/hooks/debug dumps observe the payload)."""
@@ -113,16 +115,18 @@ def build_api_request(
     api_messages, _moa_prepared_request, tools_for_api = (
         _redecorate_prompt_cache_for_provider(
             agent, api_messages, system_message=system_message, moa_prepared=_moa_prepared_request,
-            tools_for_api=tools_for_api,
+            tools_for_api=tools_for_api, anthropic_oauth_replay_entries=_oauth_replay_entries,
         )
     )
     # A model that rejected image content gets text only; history keeps the images.
     strip_images_for_rejecting_model(agent, api_messages)
     observe_request_tools(agent, tools_for_api)
+    # The replay marker stays on api_messages for the next attempt's redecoration only.
+    request_messages = strip_anthropic_oauth_replay_markers(api_messages)
     if tools_for_api == agent.tools:
-        api_kwargs = agent._build_api_kwargs(api_messages)
+        api_kwargs = agent._build_api_kwargs(request_messages)
     else:
-        api_kwargs = agent._build_api_kwargs(api_messages, tools_for_api=tools_for_api)
+        api_kwargs = agent._build_api_kwargs(request_messages, tools_for_api=tools_for_api)
     apply_oauth_recovery_tool_choice(
         agent, api_kwargs, anthropic_oauth_invoke_recovery=anthropic_oauth_invoke_recovery,
     )
