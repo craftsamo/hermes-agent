@@ -168,9 +168,16 @@ def handle_oauth_markup(
 
 
 def apply_oauth_recovery_tool_choice(agent, api_kwargs, *, anthropic_oauth_invoke_recovery: bool) -> None:
-    """Arm the recovery resend: force native tool use (thinking off, as forcing requires)."""
+    """Arm the recovery resend: force native tool use (thinking off, as forcing requires).
+
+    On a model that rejects forced tool use (Opus 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1) the
+    recovery is a plain resend of the ordinary request: forcing would 400 the retry."""
     if not (anthropic_oauth_invoke_recovery and agent.api_mode == "anthropic_messages"
             and agent._is_anthropic_oauth and api_kwargs.get("tools")):
+        return
+    from agent.anthropic_adapter import _supports_forced_tool_choice
+
+    if not _supports_forced_tool_choice(api_kwargs.get("model") or agent.model):
         return
     api_kwargs["tool_choice"] = {"type": "any"}
     for key in ("thinking", "output_config", "temperature"):
