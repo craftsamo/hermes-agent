@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent.proxy_bypass import is_loopback_host
+from hermes_cli import browser_connect_prep as _prep
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
@@ -401,7 +402,9 @@ _AUTH_DB_LOCKED = ("SQLite backup made no progress within five seconds — "
 
 def _copy_auth_file(src_file: str, dst_file: str) -> str | None:
     """Copy auth state; returns None on success, else WHY the file could not be snapshotted.
-    A DB that cannot be backed up consistently within the deadline is refused, never raw-copied."""
+    A DB that cannot be backed up consistently within the deadline is refused, never raw-copied.
+    An exhausted preparation budget raises ``PreparationTimeout`` instead of a reason."""
+    _prep.remaining()
     os.makedirs(os.path.dirname(dst_file), exist_ok=True)
     try:
         if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
@@ -414,7 +417,10 @@ def _copy_auth_file(src_file: str, dst_file: str) -> str | None:
                 # the all-locked message tells the user to quit the browser.
                 before = total if last_remaining[0] is None else last_remaining[0]
                 last_remaining[0] = remaining
-                if _status != sqlite3.SQLITE_DONE and time.monotonic() >= deadline:
+                if _status == sqlite3.SQLITE_DONE:
+                    return
+                _prep.remaining()  # the call's budget outranks this DB's own deadline
+                if time.monotonic() >= deadline:
                     if remaining < before:
                         raise TimeoutError(f"SQLite backup exceeded {_AUTH_BACKUP_DEADLINE_S:g}s "
                                            "while still making progress")
@@ -430,6 +436,8 @@ def _copy_auth_file(src_file: str, dst_file: str) -> str | None:
         else:
             shutil.copy2(src_file, dst_file)
         return None
+    except _prep.PreparationTimeout:
+        raise  # not a per-file reason: the whole preparation is out of time
     except (OSError, sqlite3.Error) as e:
         # A raw DB copy can lose committed WAL or overwrite a locked destination.
         logger.debug("real-profile: could not copy %s: %s", src_file, e)
@@ -647,16 +655,24 @@ def _copy_profile_tree(src: str, dst: str, source_profile: str) -> None:
     minus caches AND the SQLite auth DBs (raw copytree of a Chrome-held file raises on Windows);
     ``_mirror_profile_auth`` copies the DBs lock-aware instead."""
     dst_default = os.path.join(dst, "Default")
+
+    def copy_within_budget(source: str, destination: str):
+        _prep.remaining(60.0)
+        return shutil.copy2(source, destination)
+
     try:
         shutil.rmtree(dst_default, ignore_errors=True)
         shutil.copytree(
             os.path.join(src, source_profile),
             dst_default,
             dirs_exist_ok=True,
+            copy_function=copy_within_budget,
             symlinks=False,
             ignore=shutil.ignore_patterns(*_SNAPSHOT_IGNORES, *_SQLITE_AUTH_DBS),
             ignore_dangling_symlinks=True)
     except shutil.Error as multi:
+        # copytree collects OSErrors per file, an exhausted budget included: surface that first.
+        _prep.remaining(60.0)
         # Per-file failures (browser mid-write) are non-fatal.
         logger.info(
             "real-profile snapshot: %d file(s) skipped copying %s/%s",
@@ -667,7 +683,13 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
     """Snapshot ``browser``'s real ACTIVE profile into the hermes copy dir; returns ``(dst, err)``.
     Copies ``Local State`` plus the active profile's auth files into the copy's ``Default``. The
     completion marker is written only after full success, so a torn first copy (disk full, Ctrl+C)
-    never looks "already populated" — it is redone from scratch."""
+    never looks "already populated" — it is redone from scratch. Bounded by the preparation budget
+    (at most 60s); running out raises ``PreparationTimeout``."""
+    with _prep.budget(60.0):
+        return _snapshot_real_profile(browser, src)
+
+
+def _snapshot_real_profile(browser: str, src: str | None) -> tuple[str | None, str | None]:
     src = src or real_profile_data_dir(browser)
     if not src or not os.path.isdir(src):
         return None, (
@@ -677,6 +699,12 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
     if resolve_err or not source_profile:
         return None, resolve_err
     dst = real_profile_copy_dir(browser)
+    # A copy still held by a browser that could not be re-attached (lost daemon metadata, missing
+    # or recycled DevToolsActivePort) must not be overlaid: rewriting its databases under it
+    # corrupts them, and a backup into a held file waits on that browser.
+    if _prep.snapshot_in_use(dst):
+        return None, ("the profile copy is still in use by a browser Hermes could not verify; "
+                      "refusing to overwrite its login data. Retry after that browser exits.")
     # Fast lock probe BEFORE any copy: a blocking file op on a Windows-locked cookie DB can
     # hang the launch for minutes. Never trips on POSIX; there a running browser surfaces later as
     # auth DB backups that miss their deadline (``_unavailable_auth_dbs_error``).
@@ -711,6 +739,8 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
             logger.debug("real-profile snapshot: could not write done marker: %s", e)
         # AFTER the marker write so the marker itself is covered; every pass, so old snapshots heal.
         _secure_snapshot(dst, contents=True)
+    except _prep.PreparationTimeout:
+        raise
     except OSError as e:
         return None, f"could not snapshot the '{browser}' profile into {dst}: {e}"
     return dst, None
