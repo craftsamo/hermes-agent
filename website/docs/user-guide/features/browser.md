@@ -213,6 +213,32 @@ browser:
 A pin naming a profile directory that doesn't exist fails closed with a
 fixable message — it never silently falls back to the last-used profile.
 
+:::note macOS: the snapshot browser blocks Dock launches of the same app
+macOS treats every process running out of one app bundle as one application.
+While the headless snapshot browser launched from `/Applications/<Browser>.app`
+is alive, clicking that browser in the Dock (or Spotlight, or `open -a`) only
+activates the headless instance, so your everyday browser will not open until
+Hermes exits. To keep both usable, launch the snapshot from an APFS clone of the
+bundle at another path — it has no shared LaunchServices identity, and because
+the clone's code signature is untouched, the Keychain `Safe Storage` entry still
+lets it decrypt your cookies:
+
+```bash
+cp -Rc "/Applications/Brave Browser.app" "$HOME/.hermes/Brave Agent.app"
+```
+
+```yaml
+# ~/.hermes/config.yaml
+browser:
+  use_real_profile: true
+  real_profile_binary: "~/.hermes/Brave Agent.app/Contents/MacOS/Brave Browser"
+```
+
+Re-clone after the browser updates (the copy is a snapshot of the binary, not
+a link). A path that is not an executable fails closed rather than falling back
+to the real bundle.
+:::
+
 When you turn the toggle back off, Hermes deletes the snapshot store
 (`~/.hermes/browser-profile/`) on the next browser use, so the copied
 credentials don't linger after you revoke consent.
