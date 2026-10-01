@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent.proxy_bypass import is_loopback_host
+from hermes_cli import browser_connect_cookie_merge as _cookie_merge
 from hermes_cli import browser_connect_prep as _prep
 from hermes_constants import get_hermes_home
 
@@ -484,10 +485,14 @@ def _copy_auth_file(src_file: str, dst_file: str, *, deadline_s: float | None = 
         return str(e) or type(e).__name__
 
 
-def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> dict[str, str]:
+def _mirror_profile_auth(src: str, dst: str, source_profile: str,
+                         merge_cookies: bool = False) -> dict[str, str]:
     """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it);
     returns ``{relative name: reason}`` for the session-cookie DBs that could NOT be copied ({} =
-    the signed-in state is usable). Locked password/autofill DBs are logged and skipped."""
+    the signed-in state is usable). Locked password/autofill DBs are logged and skipped. With
+    ``merge_cookies`` (the copy is a completed snapshot of this same source profile) its cookie
+    store is merged row-wise rather than overwritten (``browser_connect_cookie_merge``), so a
+    cookie the copy rotated survives; another profile's copy is always overwritten."""
     failed: dict[str, str] = {}
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
@@ -495,8 +500,11 @@ def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> dict[str, s
             continue
         base = os.path.basename(rel)
         session_db = base in _SESSION_AUTH_DBS
-        reason = _copy_auth_file(s, os.path.join(dst, "Default", rel),
-                                 deadline_s=None if session_db else _OPTIONAL_AUTH_BACKUP_DEADLINE_S)
+        d = os.path.join(dst, "Default", rel)
+        if merge_cookies and session_db:
+            reason = _cookie_merge.refresh_auth_file(s, d)
+        else:
+            reason = _copy_auth_file(s, d, deadline_s=None if session_db else _OPTIONAL_AUTH_BACKUP_DEADLINE_S)
         if not reason or base not in _SQLITE_AUTH_DBS:
             continue
         if session_db:
@@ -834,7 +842,7 @@ def _snapshot_real_profile(browser: str, src: str | None) -> tuple[str | None, s
         if not populated:
             _copy_profile_tree(src, dst, source_profile)
         # Both paths: lock-aware auth DB copy into Default — also the per-launch re-sync.
-        failed_dbs = _mirror_profile_auth(src, dst, source_profile)
+        failed_dbs = _mirror_profile_auth(src, dst, source_profile, same_source)
         if failed_dbs:  # no session cookies: a "real profile" launch would be signed out
             return None, _unavailable_auth_dbs_error(browser, failed_dbs)
         _drop_singleton_leftovers(dst)
