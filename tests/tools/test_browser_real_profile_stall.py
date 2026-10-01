@@ -90,12 +90,13 @@ def test_owned_browser_survives_agent_browser_metadata_loss(
             ]),
         )
         assert not prep.snapshot_in_use(str(copy) + "-other")
+    session = bt._real_profile_session()
     monkeypatch.setattr(bt, "_real_profile_cdp_cache", {})
     monkeypatch.setattr(cloud, "_use_real_profile", lambda: True)
     monkeypatch.setattr(lightpanda, "_using_lightpanda_engine", lambda: False)
     monkeypatch.setattr(bc, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(bc, "detect_default_chromium", lambda: "brave")
-    monkeypatch.setattr(bc, "chromium_executable", lambda browser: "/unused/brave")
+    monkeypatch.setattr(bc, "real_profile_executable", lambda browser: ("/unused/brave", None))
     source = tmp_path / "source"
     (source / "Default").mkdir(parents=True)
     (source / "Local State").write_text("{}", encoding="utf-8")
@@ -116,7 +117,7 @@ def test_owned_browser_survives_agent_browser_metadata_loss(
             assert (cdp, error) == (surviving, None)
             attach.assert_called_once()
             assert attach.call_args.args[:2] == (server.server_port, str(copy))
-            assert bt._real_profile_cdp_cache["cdp"] == surviving
+            assert bt._real_profile_cdp_cache[session] == surviving
         else:
             assert cdp is None and "refusing to overwrite" in error
             attach.assert_not_called()
