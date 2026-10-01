@@ -628,7 +628,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
     from agent.redact import redact_sensitive_text
+    from hermes_cli.browser_connect_prep import budget as preparation_budget
     from tools.registry import tool_error, tool_result
+    # ONE budget for the whole call: backend routing (real-profile lock wait, snapshot, launch)
+    # spends from it and the CLI gets what is left, so preparation can never outlive the call.
+    timeout = _clamp_timeout(timeout_s)
+    deadline = time.monotonic() + timeout
     if not code or not code.strip():
         return tool_error("No code provided. Pass Python that uses the pre-imported helpers, e.g. new_tab(\"https://example.com\") then print(page_info()).")
 
@@ -647,7 +652,8 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
                               "dashes, or underscores (e.g. 'r7k2').")
         env["BU_NAME"] = session
-    route_err = _route_backend(env, session, task_id, bool(local))
+    with preparation_budget(deadline=deadline):
+        route_err = _route_backend(env, session, task_id, bool(local))
     if route_err:
         return tool_error(route_err)
     bot_desktop_browser = bool(env.pop(_BOT_DESKTOP_BROWSER_SENTINEL, None))
@@ -667,7 +673,6 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
         env["BU_AUTOSPAWN"] = "1"
 
-    timeout = _clamp_timeout(timeout_s)
     started = time.time()
 
     def dispatch() -> Dict[str, Any]:
@@ -675,7 +680,10 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         with _driven_daemons_lock:
             _driven_daemons.add(env.get("BU_NAME", "default"))
         try:
-            return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            return {"proc": _run_cli_killing_process_group(cmd, code, env, remaining)}
         except subprocess.TimeoutExpired:
             return {"error_result": tool_error(
                 f"browser-use exec timed out after {timeout}s. The daemon may still be working; retry "
