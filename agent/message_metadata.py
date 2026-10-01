@@ -37,12 +37,17 @@ ABSORBED_MESSAGE_UIDS = "_absorbed_message_uids"
 # (``messages.tool_call_uid``). The provider-facing ``id`` is untouched; these never reach the wire.
 TOOL_CALL_UIDS = "_tool_call_uids"
 TOOL_CALL_UID = "_tool_call_uid"
+# Malformed Anthropic OAuth payloads a live assistant row still holds after role repair folded the malformed
+# turn into it (agent/anthropic_oauth_replay.py): the merged row has native tool_calls and no longer looks
+# malformed, so the provenance rides on the dict for later iterations of the run.
+ANTHROPIC_OAUTH_MALFORMED_PAYLOADS = "_anthropic_oauth_malformed_payloads"
 PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
     # Membership is the real contract, NOT the leading underscore: the chat-completions transport happens
     # to sweep underscore keys, but turn_context.py pops this set from every outgoing copy and a strict
     # backend 400s on any key it does not know.
     {"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id",
-     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID}
+     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
+     ANTHROPIC_OAUTH_MALFORMED_PAYLOADS}
 ) | REPAIR_BOOKKEEPING_FIELDS
 
 

@@ -16,7 +16,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict
 
-from agent.anthropic_oauth_replay import _anthropic_oauth_replay_targets
+from agent.anthropic_oauth_replay import (
+    _anthropic_oauth_replay_targets, _retain_anthropic_oauth_replay_provenance,
+)
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
 from agent.turn_context_compaction import _reanchor
@@ -207,6 +209,7 @@ def prepare_iteration(
     from agent.agent_runtime_helpers import repair_message_sequence_with_cursor
     repaired_seq = repair_message_sequence_with_cursor(agent, messages)
     if repaired_seq > 0:
+        _retain_anthropic_oauth_replay_provenance(messages, _oauth_replay_targets)
         request_logger.info(
             "Repaired %s message-alternation violations before request (session=%s)",
             repaired_seq,

@@ -7,7 +7,10 @@ history, and never for another destination. Ownership is tracked by a private in
 the request dicts:
 
 1. :func:`_anthropic_oauth_replay_targets` reads payloads BEFORE role repair (repair merges
-   assistant runs and the merged row loses the ``finish_reason`` that identifies them);
+   assistant runs and the merged row loses the ``finish_reason`` that identifies them), and
+   :func:`_retain_anthropic_oauth_replay_provenance` pins them on a survivor that no longer
+   looks malformed (``ANTHROPIC_OAUTH_MALFORMED_PAYLOADS``, a persistence-only field), so every
+   later iteration of the run omits the same payload and the cached prefix stays byte-stable;
 2. ``build_api_messages`` stamps the marker on the request clone and opens an entry;
 3. :func:`_reattach_anthropic_oauth_replay_markers` restores markers a ContextEngine dropped;
 4. :func:`_snapshot_anthropic_oauth_replay_originals` records the fully-shaped carriers;
@@ -23,6 +26,7 @@ import logging
 from copy import deepcopy
 from typing import Any, Dict, List
 
+from agent.message_metadata import ANTHROPIC_OAUTH_MALFORMED_PAYLOADS
 from agent.message_sanitization import _sanitize_surrogates
 
 logger = logging.getLogger("agent.conversation_loop")
@@ -47,21 +51,52 @@ def _assistant_runs(messages):
         yield run
 
 
+def _carried_payloads(message) -> tuple:
+    carried = message.get(ANTHROPIC_OAUTH_MALFORMED_PAYLOADS)
+    return tuple(p for p in carried if isinstance(p, str)) if isinstance(carried, list) else ()
+
+
 def _anthropic_oauth_replay_targets(messages) -> Dict[int, set]:
     """Map every row of a malformed assistant run to the run's payloads, so whichever row
-    survives role repair (the first, or a superseding one) carries them."""
+    survives role repair (the first, or a superseding one) carries them. A row a previous
+    iteration's repair already merged is recognized by its retained provenance."""
     from agent.anthropic_oauth_markup import anthropic_oauth_message_invoke_payloads
 
     targets: Dict[int, set] = {}
     for run in _assistant_runs(messages):
         payloads = {
             _sanitize_surrogates(payload)
-            for message in run for payload in anthropic_oauth_message_invoke_payloads(message)
+            for message in run
+            for payload in (*anthropic_oauth_message_invoke_payloads(message), *_carried_payloads(message))
         }
         if payloads:
             for message in run:
                 targets[id(message)] = set(payloads)
     return targets
+
+
+def _retain_anthropic_oauth_replay_provenance(messages, targets) -> None:
+    """After role repair, pin the payloads on a surviving row that no longer looks malformed.
+
+    Repair folds a malformed turn into a neighbouring native tool-call row; the survivor keeps
+    the payload text but now carries ``tool_calls``, so the next iteration's
+    :func:`_anthropic_oauth_replay_targets` would no longer recognize it and the raw markup
+    would return to the request, changing the cached prefix. Only payloads the row still
+    holds are pinned, so unrelated invoke-like text is never claimed."""
+    if not targets:
+        return
+    from agent.anthropic_oauth_markup import (
+        anthropic_oauth_message_invoke_payloads, anthropic_oauth_message_text_invoke_payloads,
+    )
+
+    for message in messages:
+        payloads = targets.get(id(message)) if isinstance(message, dict) else None
+        if not payloads or anthropic_oauth_message_invoke_payloads(message):
+            continue
+        held = {_sanitize_surrogates(p) for p in anthropic_oauth_message_text_invoke_payloads(message)}
+        retained = sorted((held & payloads) | set(_carried_payloads(message)))
+        if retained:
+            message[ANTHROPIC_OAUTH_MALFORMED_PAYLOADS] = retained
 
 
 def _stamp_anthropic_oauth_replay_marker(source, api_msg, targets, entries) -> None:
