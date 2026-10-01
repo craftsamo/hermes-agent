@@ -367,6 +367,13 @@ def test_another_profiles_connect_does_not_invalidate_this_profiles_new_session(
     assert sessions == {"task-a": info} and closed == []
 
 
+_OWNED_TARGET = pytest.mark.skip(
+    reason="browser_exec runs CDP calls in an owned daemon that verifies its endpoint each call "
+           "(browser_use_cli_target), so no reload is needed; test_browser_use_target_scope.py covers "
+           "endpoint rollover and a switch landing during an active call")
+
+
+@_OWNED_TARGET
 def test_a_browser_exec_that_routed_to_the_old_endpoint_during_a_connect_reloads_its_daemon(profiles, monkeypatch):
     """Browser Use path (the default mode): ``browser_exec`` resolves the live endpoint into
     ``BU_CDP_URL`` before the daemon is recorded. A ``/browser connect`` landing in between reaped
@@ -411,6 +418,7 @@ def test_a_browser_exec_that_routed_to_the_old_endpoint_during_a_connect_reloads
     assert first["output"] == nxt["output"] == "http://127.0.0.1:9702"
 
 
+@_OWNED_TARGET
 def test_a_connect_that_lands_while_browser_exec_spawns_its_daemon_reloads_it(profiles, monkeypatch):
     """The publish lands after routing, while the CLI spawns the daemon on the old endpoint: the daemon
     is already recorded (connect's reap reloads it) and the post-dispatch generation check reloads it

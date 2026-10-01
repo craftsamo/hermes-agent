@@ -91,6 +91,9 @@ def test_reaping_one_profile_leaves_the_other_profiles_browser_and_supervisor(pr
     assert sorted(stopped) == ["ta", "vault-a"] and list(SUPERVISOR_REGISTRY._by_task) == ["tb"]
 
 
+@pytest.mark.skip(reason="browser_exec runs CDP calls in an owned daemon scoped per home that verifies its "
+                         "endpoint each call (browser_use_cli_target); test_browser_use_target_scope.py "
+                         "covers profile isolation and endpoint rollover")
 def test_each_profile_drives_and_reaps_its_own_harness_daemon(profiles, monkeypatch, tmp_path):
     """The harness names a daemon by BU_NAME alone (unnamed exec: ``default``) and reuses a live one, so
     with one shared runtime dir B's exec drove A's connected browser and A's reap stopped B's daemon."""
