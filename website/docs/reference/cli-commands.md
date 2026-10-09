@@ -681,7 +681,7 @@ hermes auth list                                         # Show all pools
 hermes auth list openrouter                              # Show specific provider
 hermes auth add openrouter --api-key sk-or-v1-xxx        # Add API key
 hermes auth add openrouter --type oauth                  # Browser login (OpenRouter PKCE) mints a key for you
-hermes auth add anthropic --type oauth                   # Add OAuth credential
+hermes auth add anthropic-oauth                          # Add a Claude Pro/Max OAuth login
 hermes auth add openai-codex --type oauth --priority 0   # Add an account and try it first
 hermes auth add openai-codex --browser                   # Codex: browser auth-code + PKCE on localhost:1455 instead of device code
 hermes auth remove openrouter 2                          # Remove by index
@@ -689,8 +689,8 @@ hermes auth priority openrouter backup-key 0             # Move a credential to 
 hermes auth reset openrouter                             # Clear cooldowns
 hermes auth reset openrouter 2                           # Clear the cooldown on one credential
 hermes auth refresh openai-codex work                    # Refresh one OAuth credential and clear its cooldown
-hermes auth status anthropic                             # Show auth status for a provider
-hermes auth logout anthropic                             # Log out and clear stored auth state
+hermes auth status anthropic-oauth                       # Show auth status for a provider
+hermes auth logout anthropic-oauth                       # Log out and clear stored auth state
 hermes auth spotify                                      # Authenticate Hermes with Spotify via PKCE
 ```
 
