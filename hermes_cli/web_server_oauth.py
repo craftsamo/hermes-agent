@@ -41,11 +41,12 @@ def _token_status(source: str, source_label: str, creds: Dict[str, Any]) -> Dict
 
 
 def _anthropic_oauth_status() -> Dict[str, Any]:
-    """Status for the "Anthropic Account" card: Hermes-managed PKCE file first, then the
-    registry-ordered env vars (process env — where Bitwarden-sourced secrets land — then .env).
+    """Status for the "Anthropic (Claude Pro/Max)" card (the ``anthropic-oauth`` lane): Hermes-managed
+    PKCE file first, then the lane's registry-ordered env vars (process env — where Bitwarden-sourced
+    secrets land — then .env). ANTHROPIC_API_KEY belongs to the ``anthropic`` lane's API-key row.
 
     Claude Code's ``~/.claude/.credentials.json`` is deliberately NOT read here; it has its own
-    ``claude-code`` entry, and counting it here would shadow a real ANTHROPIC_API_KEY.
+    ``claude-code`` entry.
     """
     try:
         from agent.anthropic_credentials import read_hermes_oauth_credentials, _get_hermes_oauth_file
@@ -55,10 +56,10 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
     if hermes_creds and hermes_creds.get("accessToken"):
         return _token_status("hermes_pkce", f"Hermes PKCE ({_get_hermes_oauth_file()})", hermes_creds)
 
-    env_var_order: tuple = ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    env_var_order: tuple = ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
-        env_var_order = PROVIDER_REGISTRY["anthropic"].api_key_env_vars
+        env_var_order = PROVIDER_REGISTRY["anthropic-oauth"].api_key_env_vars
     except (ImportError, KeyError):
         pass
     from hermes_cli.config import get_env_value
@@ -166,8 +167,10 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     # Anthropic / Claude entries sit at the bottom. Deliberately flow == "external": an
     # in-dashboard Connect button would let a scriptable HTTP endpoint mint Claude Pro/Max
     # subscription tokens outside Anthropic's own client, against its OAuth usage policies.
-    # Login works via the terminal (`hermes auth add anthropic`) or a plain API key.
-    {"id": "anthropic", "name": "Anthropic Account", "flow": "external", "cli_command": "hermes auth add anthropic",
+    # Login works via the terminal (`hermes auth add anthropic-oauth`); an API key is the separate
+    # ``anthropic`` provider on the API-keys tab.
+    {"id": "anthropic-oauth", "name": "Anthropic (Claude Pro/Max)", "flow": "external",
+     "cli_command": "hermes auth add anthropic-oauth",
      "docs_url": "https://docs.claude.com/en/api/getting-started", "status_fn": _anthropic_oauth_status},
     {"id": "claude-code", "name": "Anthropic OAuth: Required Extra Usage Credits to Use Subscription",
      "flow": "external", "cli_command": "claude setup-token",
