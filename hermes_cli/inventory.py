@@ -497,14 +497,14 @@ def _anthropic_oauth_credentials_present() -> bool:
             return True
     except Exception:
         return False
-    # Pool-only OAuth entries (auth.json credential_pool.anthropic) are equally deliberate — discovery
-    # accepts them via pool.has_credentials(), so the filter must too or those rows are built then
-    # silently dropped. Read-only (no load_pool) so a picker open never mutates auth.json.
+    # Pool-only OAuth entries (auth.json credential_pool.anthropic-oauth) are equally deliberate —
+    # discovery accepts them via pool.has_credentials(), so the filter must too or those rows are built
+    # then silently dropped. Read-only (no load_pool) so a picker open never mutates auth.json.
     try:
         from agent.credential_pool import AUTH_TYPE_OAUTH
         from hermes_cli.auth import read_credential_pool
 
-        for entry in read_credential_pool("anthropic"):
+        for entry in read_credential_pool("anthropic-oauth"):
             if (isinstance(entry, dict) and entry.get("auth_type") == AUTH_TYPE_OAUTH
                     and str(entry.get("access_token") or "").strip()):
                 return True
@@ -534,7 +534,7 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
         return (
             # Anthropic OAuth (device flow / Claude Code) and external-process CLIs (copilot-acp) are
             # deliberate sign-ins that leave no trace in config/env; keep the rows discovery accepted.
-            (slug == "anthropic" and _anthropic_oauth_credentials_present())
+            (slug == "anthropic-oauth" and _anthropic_oauth_credentials_present())
             or _external_process_signed_in(slug)
             or is_provider_explicitly_configured(slug)
         )

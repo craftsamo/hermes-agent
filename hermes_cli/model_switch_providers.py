@@ -269,6 +269,15 @@ def _skip(seen: set, excluded: set, *keys: str) -> bool:
     return any(k in seen for k in lowered) or any(k in excluded for k in lowered)
 
 
+def _mdev_to_hermes() -> dict[str, str]:
+    """models.dev id -> Hermes id. Several Hermes ids can share one catalog (``anthropic`` /
+    ``anthropic-oauth``); the id named like the catalog wins, so a sibling lane never takes its slot."""
+    from agent.models_dev import PROVIDER_TO_MODELS_DEV
+    out = {v: k for k, v in PROVIDER_TO_MODELS_DEV.items()}
+    out.update({k: k for k, v in PROVIDER_TO_MODELS_DEV.items() if k == v})
+    return out
+
+
 def _iter_builtin_candidates(models_dev_data: dict, excluded: set, seen: set):
     """Yield ``(hermes_id, mdev_id, pconfig, env_vars)`` for section-1 rows.
 
@@ -642,7 +651,6 @@ def _collect_authed_provider_slugs(
     Env vars are read through the per-profile secret scope. AWS SDK providers are skipped
     (heavier detection)."""
     from hermes_cli.model_switch import _scoped_key_env
-    from agent.models_dev import PROVIDER_TO_MODELS_DEV
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.providers import HERMES_OVERLAYS
     from hermes_cli.models import CANONICAL_PROVIDERS
@@ -658,7 +666,7 @@ def _collect_authed_provider_slugs(
         if _any_env(env_vars, _scoped_key_env) or _raw_pool_usable(hermes_id):
             _emit(hermes_id, hermes_id)
 
-    mdev_to_hermes = {v: k for k, v in PROVIDER_TO_MODELS_DEV.items()}
+    mdev_to_hermes = _mdev_to_hermes()
     for pid, overlay in HERMES_OVERLAYS.items():
         hermes_slug = mdev_to_hermes.get(pid, pid)
         if _skip(seen, excluded_set, pid, hermes_slug) or overlay.auth_type == "aws_sdk":
@@ -819,7 +827,7 @@ def _lap_lmstudio_row(b: _PickerBuild, user_providers: dict) -> None:
 def _lap_builtin_rows(b: _PickerBuild, data: dict, user_providers: dict) -> None:
     """Section 1: models.dev-mapped providers with api_key auth."""
     from hermes_cli.model_switch import _declared_model_ids, _scoped_key_env
-    from agent.models_dev import get_provider_info
+    from agent.models_dev import PROVIDER_TO_MODELS_DEV, get_provider_info
     for hermes_id, mdev_id, pconfig, env_vars in _iter_builtin_candidates(data, b.excluded, b.seen_slugs):
         # Per-profile scope, never raw os.environ: a secondary profile's picker otherwise listed the
         # LAUNCH profile's env-keyed providers and hid its own .env-keyed ones.
@@ -833,8 +841,10 @@ def _lap_builtin_rows(b: _PickerBuild, data: dict, user_providers: dict) -> None
         model_ids = list(dict.fromkeys([*configured_models, *model_ids]))
         pinfo = get_provider_info(mdev_id)
         display_name = pconfig.name if pconfig and pconfig.name else (pinfo.name if pinfo else mdev_id)
-        b.add_builtin_row(
-            hermes_id, display_name, b.current_provider in (hermes_id, mdev_id), model_ids, "built-in")
+        # A catalog id that is itself a Hermes provider (``anthropic``) marks only that row current.
+        is_current = b.current_provider == hermes_id or (
+            b.current_provider == mdev_id and mdev_id not in PROVIDER_TO_MODELS_DEV)
+        b.add_builtin_row(hermes_id, display_name, is_current, model_ids, "built-in")
 
 
 def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> bool:
@@ -892,13 +902,12 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
 
 def _lap_overlay_rows(b: _PickerBuild, data: dict, user_providers: dict) -> None:
     """Section 2: Hermes-only providers (nous, openai-codex, copilot, opencode-go, ...)."""
-    from agent.models_dev import PROVIDER_TO_MODELS_DEV
     from hermes_cli.model_switch import _declared_model_ids
     from hermes_cli.providers import HERMES_OVERLAYS
 
     # HERMES_OVERLAYS keys may be models.dev IDs ("github-copilot") while config.yaml uses
     # Hermes IDs ("copilot").
-    mdev_to_hermes = {v: k for k, v in PROVIDER_TO_MODELS_DEV.items()}
+    mdev_to_hermes = _mdev_to_hermes()
     for pid, overlay in HERMES_OVERLAYS.items():
         hermes_slug = mdev_to_hermes.get(pid, pid)
         if _skip(b.seen_slugs, b.excluded, pid, hermes_slug):
