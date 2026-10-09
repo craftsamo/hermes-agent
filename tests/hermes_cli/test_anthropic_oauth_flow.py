@@ -29,7 +29,7 @@ def test_run_anthropic_oauth_flow_prefers_claude_code_credentials(tmp_path, monk
 
     env_vars = load_env()
     assert env_vars["ANTHROPIC_TOKEN"] == ""
-    assert env_vars["ANTHROPIC_API_KEY"] == ""
+    assert "ANTHROPIC_API_KEY" not in env_vars
     output = capsys.readouterr().out
     assert "Claude Code credentials linked" in output
 
