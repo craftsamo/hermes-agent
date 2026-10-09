@@ -19,6 +19,7 @@ from agent.credential_pool import (  # custom_provider_pool_key_candidates is re
     CredentialPool, PooledCredential, credential_pool_matches_provider, custom_provider_pool_key_candidates,  # noqa: F401
     load_pool,
 )
+from agent.anthropic_provider import is_anthropic_provider
 from agent.secret_scope import get_secret_str
 from hermes_cli.auth import (  # resolve_external_process_provider_credentials is read via origin by runtime_provider_backends
     ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, AuthError, DEFAULT_CODEX_BASE_URL, DEFAULT_QWEN_BASE_URL, DEFAULT_XAI_OAUTH_BASE_URL,
@@ -292,8 +293,6 @@ def _maybe_apply_codex_app_server_runtime(*, provider: str, api_mode: str, model
 # ── base_url / credential helpers ──────────────────────────────────────────────────────────
 
 _ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
-_NO_ANTHROPIC_CREDENTIALS_MSG = ("No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, "
-                                 "or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY.")
 
 
 def _runtime(provider: str, api_mode: str, base_url: Any, api_key: Any, **extra: Any) -> Dict[str, Any]:
@@ -342,22 +341,23 @@ def _anthropic_base_url_override_ok(base_url: str) -> bool:
                                or _detect_api_mode_for_url(candidate) == "anthropic_messages")
 
 
-def _anthropic_cfg_base_url(model_cfg: Dict[str, Any]) -> str:
-    """Config base_url for native Anthropic, or "" when absent/untrustworthy."""
-    cfg_base_url = _config_base_url_for_provider(model_cfg, "anthropic")
+def _anthropic_cfg_base_url(model_cfg: Dict[str, Any], provider: str = "anthropic") -> str:
+    """Config base_url for a native Anthropic lane, or "" when absent/untrustworthy."""
+    cfg_base_url = _config_base_url_for_provider(model_cfg, provider)
     return cfg_base_url if _anthropic_base_url_override_ok(cfg_base_url) else ""
 
 
-def _anthropic_token_or_raise(*, model: str | None = None) -> str:
+def _anthropic_token_or_raise(*, model: str | None = None, provider: str = "anthropic") -> str:
     from agent.anthropic_credentials import resolve_anthropic_token
-    token = resolve_anthropic_token(model=model)
+    from agent.anthropic_provider import lane_mismatch_hint
+    token = resolve_anthropic_token(model=model, provider=provider)
     if not token:
         # A key the pool benched for *this* model is not a missing credential; telling the
         # user to re-authenticate would send them chasing a cooldown that lifts on its own.
-        if model and resolve_anthropic_token():
+        if model and resolve_anthropic_token(provider=provider):
             raise AuthError(f"Anthropic credentials are rate-limited for {model}; "
-                            "other Claude models remain available (see `hermes auth list`).")
-        raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
+                            f"other Claude models remain available (see `hermes auth list {provider}`).")
+        raise AuthError(lane_mismatch_hint(provider))
     return token
 
 
@@ -542,8 +542,8 @@ def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_u
             if base_url.rstrip("/") in ("", canonical):
                 base_url = _config_base_url_for_provider(model_cfg, provider) or base_url
         return api_mode, base_url or (default_url() if callable(default_url) else default_url)
-    if provider == "anthropic":
-        return "anthropic_messages", _anthropic_cfg_base_url(model_cfg) or base_url or _ANTHROPIC_DEFAULT_BASE_URL
+    if is_anthropic_provider(provider):
+        return "anthropic_messages", _anthropic_cfg_base_url(model_cfg, provider) or base_url or _ANTHROPIC_DEFAULT_BASE_URL
     if provider == "nous":
         return nous_api_mode(effective_model), (_nous_inference_env_override() or "") or base_url
     if provider == "copilot":
@@ -662,10 +662,15 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[s
 # ── explicit (--api-key / --base-url) path ─────────────────────────────────────────────────
 
 
-def _explicit_anthropic(requested_provider, model_cfg, api_key, base_url, target_model):
-    base_url = base_url or _anthropic_cfg_base_url(model_cfg) or _ANTHROPIC_DEFAULT_BASE_URL
-    api_key = api_key or _anthropic_token_or_raise(model=target_model)
-    return _runtime("anthropic", "anthropic_messages", base_url, api_key, source="explicit", requested_provider=requested_provider)
+def _explicit_anthropic(provider, requested_provider, model_cfg, api_key, base_url, target_model):
+    from agent.anthropic_provider import lane_accepts_token, lane_mismatch_hint
+    if api_key and not lane_accepts_token(provider, api_key):
+        # An explicit key of the other lane would bill that account under this provider's label.
+        raise AuthError(f"The key given for provider '{provider}' belongs to the other Anthropic billing "
+                        f"lane. {lane_mismatch_hint(provider)}")
+    base_url = base_url or _anthropic_cfg_base_url(model_cfg, provider) or _ANTHROPIC_DEFAULT_BASE_URL
+    api_key = api_key or _anthropic_token_or_raise(model=target_model, provider=provider)
+    return _runtime(provider, "anthropic_messages", base_url, api_key, source="explicit", requested_provider=requested_provider)
 
 
 def _creds_fallback(api_key, explicit_base_url, base_url, expiry, expiry_key, resolve):
@@ -733,7 +738,9 @@ def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg,
 # Providers with a dedicated explicit-credential builder; everything else goes through the
 # registry ``api_key`` path (or None when the provider takes no explicit creds).
 _EXPLICIT_RESOLVERS: Dict[str, Callable[..., Dict[str, Any]]] = {
-    "anthropic": _explicit_anthropic, "openai-codex": _explicit_codex, "nous": _explicit_nous,
+    "anthropic": lambda rq, mc, key, url, tm: _explicit_anthropic("anthropic", rq, mc, key, url, tm),
+    "anthropic-oauth": lambda rq, mc, key, url, tm: _explicit_anthropic("anthropic-oauth", rq, mc, key, url, tm),
+    "openai-codex": _explicit_codex, "nous": _explicit_nous,
     "azure-foundry": lambda rq, mc, key, url, tm: _resolve_azure_foundry_runtime(requested_provider=rq, model_cfg=mc,
                                                                                  explicit_api_key=key, explicit_base_url=url),
 }
@@ -818,20 +825,20 @@ def _azure_anthropic_env_key(model_cfg: Dict[str, Any]) -> str:
             or get_secret_str("ANTHROPIC_API_KEY", "").strip())
 
 
-def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any], target_model: str | None = None) -> Dict[str, Any]:
-    """Native Anthropic (Messages API) from env/auth store; ``model.base_url`` honoured only when
-    the configured provider is anthropic (else a Codex endpoint would leak into Anthropic requests)."""
-    base_url = _anthropic_cfg_base_url(model_cfg) or _ANTHROPIC_DEFAULT_BASE_URL
-    # Microsoft Foundry endpoints reject Claude Code OAuth tokens, which resolve_anthropic_token()
-    # would return first — use the env key directly.
-    if base_url_host_matches(base_url, "azure.com"):
+def _anthropic_env_runtime(provider: str, requested_provider: str, model_cfg: Dict[str, Any],
+                           target_model: str | None = None) -> Dict[str, Any]:
+    """Native Anthropic lane (Messages API) from env/auth store; ``model.base_url`` honoured only when
+    the configured provider is this lane (else a Codex endpoint would leak into Anthropic requests)."""
+    base_url = _anthropic_cfg_base_url(model_cfg, provider) or _ANTHROPIC_DEFAULT_BASE_URL
+    # Microsoft Foundry endpoints reject Claude Code OAuth tokens — use the env key directly.
+    if provider == "anthropic" and base_url_host_matches(base_url, "azure.com"):
         token = _azure_anthropic_env_key(model_cfg)
         if not token:
             raise AuthError("No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or ANTHROPIC_API_KEY, or point "
                             "key_env/api_key_env in your config.yaml model section at a custom env var.")
     else:
-        token = _anthropic_token_or_raise(model=target_model)
-    return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
+        token = _anthropic_token_or_raise(model=target_model, provider=provider)
+    return _runtime(provider, "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
 
 
 def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model) -> Dict[str, Any]:
@@ -1073,8 +1080,8 @@ def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, targe
         yield _minimax_oauth_runtime(provider, requested_provider)
     if _is_external_process_provider(provider):
         yield _resolve_external_process_runtime(provider, requested_provider)
-    if provider == "anthropic":
-        yield _anthropic_env_runtime(requested_provider, model_cfg, target_model)
+    if is_anthropic_provider(provider):
+        yield _anthropic_env_runtime(provider, requested_provider, model_cfg, target_model)
     if provider == "bedrock":
         yield _resolve_bedrock_runtime(requested_provider, model_cfg, target_model)
     pconfig = PROVIDER_REGISTRY.get(provider)

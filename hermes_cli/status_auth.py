@@ -91,8 +91,10 @@ _FEATURE_STATES = (
 def _render_api_keys(ctx):
     _status._section("API Keys")
     from hermes_cli.auth import get_anthropic_key
-    # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
-    for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key)):
+    # Anthropic uses the dedicated lookup (the registry's env order); the subscription lane's
+    # ANTHROPIC_TOKEN is listed beside it.
+    for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key),
+                          ("Anthropic (Claude Pro/Max)", ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"))):
         value = env_ref() if callable(env_ref) else _status._first_env_value(env_ref)
         _status._row(name, bool(value), config.redact_key(value))
 

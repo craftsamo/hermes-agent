@@ -140,13 +140,20 @@ That distinction is especially important for:
 
 Anthropic is not just "via OpenRouter" anymore.
 
-When provider resolution selects `anthropic`, Hermes uses:
+When provider resolution selects `anthropic` or `anthropic-oauth`, Hermes uses:
 
 - `api_mode = anthropic_messages`
 - the native Anthropic Messages API
 - `agent/anthropic_adapter.py` for translation
 
-Credential resolution for native Anthropic now prefers refreshable Claude Code credentials over copied env tokens when both are present. In practice that means:
+The two ids are billing lanes on one backend (`agent/anthropic_provider.py`). Backend checks
+(cache layout, pricing, context length, entitlement handling) ask `is_anthropic_provider()`;
+credential discovery tells them apart. `anthropic` resolves only Console API keys
+(`ANTHROPIC_API_KEY`, API-key pool rows) and `anthropic-oauth` only subscription tokens; each
+lane's pool skips a token of the other lane's shape (`lane_accepts_token()`), so rotation or a
+`/model` switch never bills the other account.
+
+Credential resolution for `anthropic-oauth` prefers refreshable Claude Code credentials over copied env tokens when both are present. In practice that means:
 
 - Claude Code credential files are treated as the preferred source when they include refreshable auth
 - manual `ANTHROPIC_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` values still work as explicit overrides

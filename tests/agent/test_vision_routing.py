@@ -196,7 +196,7 @@ model:
   provider: anthropic
   default: claude-sonnet-4-6
 """)
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-test")
         _fresh_modules()
 
         from agent.auxiliary_client import resolve_vision_provider_client

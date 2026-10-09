@@ -9,6 +9,7 @@ import time
 from contextlib import suppress
 from typing import Any, Optional
 
+from agent.anthropic_provider import is_anthropic_provider
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static, lazy_attr as _lazy_attr
 from hermes_cli.timeouts import get_provider_request_timeout
 from utils import base_url_host_matches, env_float
@@ -78,8 +79,10 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
     if fb_api_mode == "anthropic_messages":
         from agent.anthropic_adapter import build_anthropic_client
         from agent.anthropic_credentials import resolve_anthropic_token, anthropic_route_is_oauth
-        is_anthropic = fb_provider == "anthropic"
-        effective_key = credential or (resolve_anthropic_token(model=getattr(agent, "model", None)) if is_anthropic else None) or ""
+        is_anthropic = is_anthropic_provider(fb_provider)
+        effective_key = credential or (
+            resolve_anthropic_token(model=getattr(agent, "model", None), provider=fb_provider)
+            if is_anthropic else None) or ""
         agent.api_key = agent._anthropic_api_key = effective_key
         agent._anthropic_base_url = fb_base_url
         agent._anthropic_client = build_anthropic_client(effective_key, fb_base_url, timeout=timeout)
@@ -880,7 +883,7 @@ class ClientLifecycleMixin:
         anthropic_base_url = getattr(self, "_anthropic_base_url", "") or ""
         if (
             self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key")
-            or self.provider != "anthropic" or base_url_host_matches(anthropic_base_url, "azure.com")
+            or not is_anthropic_provider(self.provider) or base_url_host_matches(anthropic_base_url, "azure.com")
         ):
             return False
         # Off the official hosts (a /anthropic proxy the resolver accepts, or a URL-bearing alias,
@@ -894,7 +897,7 @@ class ClientLifecycleMixin:
             return False
         try:
             from agent.anthropic_credentials import resolve_anthropic_token
-            new_token = resolve_anthropic_token(model=self.model)
+            new_token = resolve_anthropic_token(model=self.model, provider=self.provider)
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False

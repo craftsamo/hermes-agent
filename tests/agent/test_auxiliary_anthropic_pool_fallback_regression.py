@@ -33,7 +33,7 @@ class TestAnthropicPoolExhaustedFallsBackToEnv:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
 
-            client, model = _try_anthropic()
+            client, model = _try_anthropic(provider="anthropic-oauth")
 
         assert client is not None, (
             "_try_anthropic must fall back to resolve_anthropic_token() when the "
@@ -56,7 +56,7 @@ class TestAnthropicPoolExhaustedFallsBackToEnv:
         ):
             from agent.auxiliary_client import _try_anthropic
 
-            client, model = _try_anthropic()
+            client, model = _try_anthropic(provider="anthropic-oauth")
 
         assert client is None
         assert model is None
@@ -78,7 +78,7 @@ class TestAnthropicPoolExhaustedFallsBackToEnv:
         ):
             from agent.auxiliary_client import _try_anthropic
 
-            client, _model = _try_anthropic()
+            client, _model = _try_anthropic(provider="anthropic-oauth")
 
         assert client is not None
         assert captured["base_url"] == "https://api.anthropic.com"

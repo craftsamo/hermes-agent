@@ -44,6 +44,8 @@ class _Provider:
 _PROVIDERS: tuple[_Provider, ...] = (
     _Provider("OpenAI", "https://platform.openai.com/settings/organization/billing", ("openai",), ("api.openai.com",)),
     _Provider("Anthropic", "https://console.anthropic.com/settings/billing", ("anthropic",), ("api.anthropic.com",)),
+    # Same host as the API lane: the slug alone tells subscription usage from Console credits.
+    _Provider("Claude subscription", "https://claude.ai/settings/usage", ("anthropic-oauth",)),
     _Provider("OpenRouter", "https://openrouter.ai/settings/credits", ("openrouter",), ("openrouter.ai",)),
     _Provider("xAI", "https://console.x.ai/team/default/billing", ("xai", "xai-oauth"), ("api.x.ai",)),
     _Provider("DeepSeek", "https://platform.deepseek.com/top_up", ("deepseek",), ("api.deepseek.com",)),

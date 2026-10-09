@@ -66,7 +66,7 @@ def plugin_profiles():
 def test_pool_refresh_dispatches_to_profile_hook(plugin_profiles, monkeypatch):
     assert is_refreshable_oauth_provider("example-oauth") is True
     assert is_refreshable_oauth_provider("example-oauth-nohook") is False
-    assert is_refreshable_oauth_provider("anthropic") is True  # built-ins unchanged
+    assert is_refreshable_oauth_provider("anthropic-oauth") is True  # built-ins unchanged
 
     entry = _entry()
     pool = CredentialPool("example-oauth", [entry])

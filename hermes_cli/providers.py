@@ -42,7 +42,9 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "copilot-acp": HermesOverlay(transport="codex_responses", auth_type="external_process",
                                  base_url_override="acp://copilot", base_url_env_var="COPILOT_ACP_BASE_URL"),
     "github-copilot": HermesOverlay(extra_env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN")),
-    "anthropic": HermesOverlay(transport="anthropic_messages", extra_env_vars=("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
+    "anthropic": HermesOverlay(transport="anthropic_messages"),
+    "anthropic-oauth": HermesOverlay(transport="anthropic_messages", extra_env_vars=("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+                                     base_url_override="https://api.anthropic.com", base_url_env_var="ANTHROPIC_BASE_URL"),
     "zai": HermesOverlay(extra_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), base_url_env_var="GLM_BASE_URL"),
     "kimi-for-coding": HermesOverlay(base_url_env_var="KIMI_BASE_URL"),
     "stepfun": HermesOverlay(extra_env_vars=("STEPFUN_API_KEY",),
@@ -118,7 +120,7 @@ _ALIAS_GROUPS: Dict[str, Tuple[str, ...]] = {
     "nvidia": ("nim", "nvidia-nim", "build-nvidia", "nemotron"),
     "kimi-for-coding": ("kimi", "kimi-coding", "kimi-coding-cn", "moonshot"),
     "stepfun": ("step", "stepfun-coding-plan"), "minimax-cn": ("minimax-china", "minimax_cn"),
-    "anthropic": ("claude", "claude-code"), "github-copilot": ("copilot", "github"),
+    "anthropic": ("claude",), "anthropic-oauth": ("claude-code", "claude-oauth"), "github-copilot": ("copilot", "github"),
     "copilot-acp": ("github-copilot-acp",), "openai-codex": ("chatgpt", "chatgpt-codex"),
     "vercel": ("ai-gateway", "aigateway", "vercel-ai-gateway"),
     "opencode": ("opencode-zen", "zen"), "opencode-go": ("go", "opencode-go-sub"), "kilo": ("kilocode", "kilo-code", "kilo-gateway"),
@@ -147,7 +149,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "upstage": "Upstage Solar", "actual": "Actual Computer", "tencent-tokenhub": "Tencent TokenHub",
     "nebius-token-factory": "Nebius Token Factory", "tencent-tokenplan": "Tencent TokenPlan", "lmstudio": "LM Studio",
     "custom": "Custom endpoint", "bedrock": "AWS Bedrock", "vertex": "Google Vertex AI", "ollama-cloud": "Ollama Cloud",
-    "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
+    "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)", "anthropic-oauth": "Anthropic (Claude Pro/Max)",
 }
 
 

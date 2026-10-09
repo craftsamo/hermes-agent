@@ -24,7 +24,7 @@ def test_anthropic_picker_discovers_models_with_pool_api_key(monkeypatch):
     monkeypatch.setattr(models, "_get_model_config_dict", lambda: {"provider": "nous"})
     monkeypatch.setattr(
         "agent.anthropic_credentials.resolve_anthropic_token",
-        lambda: None,
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(
         "hermes_cli.auth.read_credential_pool",
@@ -72,7 +72,7 @@ def test_anthropic_pool_api_key_overrides_conflicting_active_endpoint(monkeypatc
     )
     monkeypatch.setattr(
         "agent.anthropic_credentials.resolve_anthropic_token",
-        lambda: None,
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(
         "hermes_cli.auth.read_credential_pool",
