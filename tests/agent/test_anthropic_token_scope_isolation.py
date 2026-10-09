@@ -172,7 +172,7 @@ class TestOAuthTokenLeakageFromEnviron:
         ss.set_multiplex_active(True)
         tok = ss.set_secret_scope({"ANTHROPIC_TOKEN": "sk-ant-oat-PROFILE-A-OWN-OAUTH"})
         try:
-            result = resolve_anthropic_token()
+            result = resolve_anthropic_token(provider="anthropic-oauth")
         finally:
             ss.reset_secret_scope(tok)
 

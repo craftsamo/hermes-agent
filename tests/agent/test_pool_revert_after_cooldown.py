@@ -16,7 +16,7 @@ from agent.credential_pool import EXHAUSTED_TTL_429_SECONDS, CredentialPool, Poo
 _BASE = "https://api.anthropic.com"
 
 
-def _entry(entry_id, label, *, priority, auth_type, token):
+def _entry(entry_id, label, *, priority, auth_type, token, provider="anthropic-oauth"):
     raw = {
         "id": entry_id, "label": label, "auth_type": auth_type, "priority": priority,
         "access_token": token, "base_url": _BASE, "source": "manual",
@@ -24,7 +24,7 @@ def _entry(entry_id, label, *, priority, auth_type, token):
     if auth_type == "oauth":
         raw["refresh_token"] = f"rt-{entry_id}"
         raw["expires_at_ms"] = int((time.time() + 30 * 86400) * 1000)
-    return PooledCredential.from_dict("anthropic", raw)
+    return PooledCredential.from_dict(provider, raw)
 
 
 class _LiveAgent:
@@ -32,8 +32,8 @@ class _LiveAgent:
 
     _fallback_activated = False
     _fallback_index = 0
-    _primary_runtime = {"provider": "anthropic", "model": "claude-opus-5", "base_url": _BASE}
-    provider = "anthropic"
+    _primary_runtime = {"provider": "anthropic-oauth", "model": "claude-opus-5", "base_url": _BASE}
+    provider = "anthropic-oauth"
     model = "claude-opus-5"
     base_url = _BASE
 
@@ -59,9 +59,9 @@ def _expire_cooldowns(monkeypatch, real=None, windows=1):
 
 def test_live_session_reverts_to_quota_benched_credential_once_cooldown_lifts(monkeypatch):
     real_time = time.time
-    pool = CredentialPool(provider="anthropic", entries=[
+    pool = CredentialPool(provider="anthropic-oauth", entries=[
         _entry("pref0000", "subscription-oauth", priority=0, auth_type="oauth", token="sk-ant-oat01-PREF"),
-        _entry("fall0000", "paid-api-key", priority=1, auth_type="api_key", token="sk-ant-api03-FALL"),
+        _entry("fall0000", "second-subscription", priority=1, auth_type="oauth", token="sk-ant-oat01-FALL"),
     ])
     agent = _LiveAgent(pool)
     assert agent.api_key == "sk-ant-oat01-PREF"
@@ -69,11 +69,11 @@ def test_live_session_reverts_to_quota_benched_credential_once_cooldown_lifts(mo
     # 429 twice = retry once, then rotate (the real rate-limit ladder).
     recover_with_credential_pool(agent, status_code=429, has_retried_429=False, error_context={"message": "Error"})
     recovered, _ = recover_with_credential_pool(agent, status_code=429, has_retried_429=True, error_context={"message": "Error"})
-    assert recovered and agent.api_key == "sk-ant-api03-FALL"
+    assert recovered and agent.api_key == "sk-ant-oat01-FALL"
 
     # Control: while the bench is still active the session stays on the fallback.
     assert restore_primary_runtime(agent) is False
-    assert agent.api_key == "sk-ant-api03-FALL"
+    assert agent.api_key == "sk-ant-oat01-FALL"
 
     _expire_cooldowns(monkeypatch)
     assert restore_primary_runtime(agent) is False  # credential-only: no primary-runtime restore ran
@@ -87,16 +87,16 @@ def test_live_session_reverts_to_quota_benched_credential_once_cooldown_lifts(mo
     # Control (two-session interleaving): a session that started on the FALLBACK because another
     # session benched the preferred entry, then rotates UP to the preferred entry once its window
     # reopened, must not be pulled back DOWN when the fallback's own cooldown lifts.
-    pool2 = CredentialPool(provider="anthropic", entries=[
+    pool2 = CredentialPool(provider="anthropic-oauth", entries=[
         _entry("pref0000", "subscription-oauth", priority=0, auth_type="oauth", token="sk-ant-oat01-PREF"),
-        _entry("fall0000", "paid-api-key", priority=1, auth_type="api_key", token="sk-ant-api03-FALL"),
+        _entry("fall0000", "second-subscription", priority=1, auth_type="oauth", token="sk-ant-oat01-FALL"),
     ])
     monkeypatch.setattr(cp.time, "time", real_time)
     pool2.mark_exhausted_and_rotate(  # the OTHER session benches the preferred entry
         status_code=429, credential_id="pref0000", failure_reason="rate_limit", error_context={"message": "Error"},
     )
     late = _LiveAgent(pool2)
-    assert late.api_key == "sk-ant-api03-FALL"
+    assert late.api_key == "sk-ant-oat01-FALL"
     _expire_cooldowns(monkeypatch, real_time, 1)  # pref's window reopened; fall benched from now
     recover_with_credential_pool(late, status_code=429, has_retried_429=False, error_context={"message": "Error"})
     recovered, _ = recover_with_credential_pool(late, status_code=429, has_retried_429=True, error_context={"message": "Error"})
@@ -110,10 +110,11 @@ def test_live_session_reverts_to_quota_benched_credential_once_cooldown_lifts(mo
 def test_auth_bench_does_not_arm_a_revert(monkeypatch):
     """A 401 bench is not a quota window: the session keeps the credential it rotated to."""
     pool = CredentialPool(provider="anthropic", entries=[
-        _entry("pref0000", "primary-key", priority=0, auth_type="api_key", token="sk-ant-api03-PREF"),
-        _entry("fall0000", "backup-key", priority=1, auth_type="api_key", token="sk-ant-api03-FALL"),
+        _entry("pref0000", "primary-key", priority=0, auth_type="api_key", token="sk-ant-api03-PREF", provider="anthropic"),
+        _entry("fall0000", "backup-key", priority=1, auth_type="api_key", token="sk-ant-api03-FALL", provider="anthropic"),
     ])
     agent = _LiveAgent(pool)
+    agent.provider = "anthropic"
     recovered, _ = recover_with_credential_pool(agent, status_code=401, has_retried_429=False, error_context={"message": "invalid"})
     assert recovered and agent.api_key == "sk-ant-api03-FALL"
 
