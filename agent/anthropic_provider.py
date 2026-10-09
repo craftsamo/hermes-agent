@@ -23,15 +23,16 @@ def is_anthropic_provider(provider: Any) -> bool:
 
 def lane_accepts_token(provider: Any, token: Any) -> bool:
     """Whether *token* may bill *provider*'s lane. Only a token recognizably shaped for the OTHER lane
-    is refused — an OAuth/setup token on ``anthropic``, a ``sk-ant-api`` Console key on
-    ``anthropic-oauth``. Every real Console key carries that prefix, so an unrecognized shape cannot
-    bill the other account; providers outside the Anthropic family accept any token."""
+    is refused — an OAuth/setup token on ``anthropic``, a Console key (``sk-ant-api…`` /
+    ``sk-ant-usr…``) on ``anthropic-oauth``. Every real Console key carries one of those prefixes,
+    so an unrecognized shape cannot bill the other account; providers outside the Anthropic family
+    accept any token."""
     normalized = str(provider or "").strip().lower()
     if normalized not in ANTHROPIC_PROVIDERS or not isinstance(token, str):
         return True
+    from agent.anthropic_credentials import CONSOLE_KEY_PREFIXES, _is_oauth_token
     if normalized == ANTHROPIC_OAUTH_PROVIDER:
-        return not token.startswith("sk-ant-api")
-    from agent.anthropic_credentials import _is_oauth_token
+        return not token.startswith(CONSOLE_KEY_PREFIXES)
     return not _is_oauth_token(token)
 
 

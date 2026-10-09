@@ -26,14 +26,19 @@ def _pool(home, provider, *rows):
         for i, row in enumerate(rows)]}}))
 
 
-@pytest.mark.parametrize("token", [API_KEY, OAUTH_TOKEN, "eyJ.jwt.fixture"])
+@pytest.mark.parametrize("token", [API_KEY, "sk-ant-usr01-user-scoped-fixture", OAUTH_TOKEN, "eyJ.jwt.fixture"])
 def test_each_recognizable_anthropic_token_fits_exactly_one_lane(token):
     assert lane_accepts_token("anthropic", token) != lane_accepts_token("anthropic-oauth", token)
     assert lane_accepts_token("openrouter", token)
 
 
+def test_user_scoped_console_key_bills_the_api_lane():
+    assert lane_accepts_token("anthropic", "sk-ant-usr01-user-scoped-fixture")
+    assert not ac._is_oauth_token("sk-ant-usr01-user-scoped-fixture")
+
+
 def test_unrecognized_token_shape_is_not_claimed_by_either_lane():
-    # Neither lane can bill the other with it: every real Console key starts with ``sk-ant-api``.
+    # Neither lane can bill the other with it: every real Console key carries a Console prefix.
     assert lane_accepts_token("anthropic", "proxy-key") and lane_accepts_token("anthropic-oauth", "proxy-key")
 
 
