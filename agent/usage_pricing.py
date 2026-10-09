@@ -380,6 +380,8 @@ def _first_nonzero(obj: Any, *paths: tuple[str, ...]) -> int:
 # api.openai.com). Google and Fireworks are matched by name OR host below.
 _SNAPSHOT_PROVIDER_ALIASES = {
     "anthropic": "anthropic", "openai": "openai", "openai-api": "openai", "minimax": "minimax", "minimax-cn": "minimax-cn",
+    # Subscription usage is priced at list rates: extra-usage credits bill per token at them.
+    "anthropic-oauth": "anthropic",
 }
 # AI Studio and Vertex host the same Gemini models (the Vertex "google/" vendor
 # prefix is stripped with the rest of the path).
@@ -616,7 +618,7 @@ def normalize_usage(
     mode = (api_mode or "").strip().lower()
     u = response_usage
 
-    if mode == "anthropic_messages" or provider_name == "anthropic":
+    if mode == "anthropic_messages" or provider_name in ("anthropic", "anthropic-oauth"):
         shape = _ANTHROPIC_USAGE_SHAPE
     elif mode == "codex_responses":
         shape = _CODEX_USAGE_SHAPE

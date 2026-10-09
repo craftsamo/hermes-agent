@@ -209,13 +209,14 @@ _REGISTRY_ROWS: Tuple[Any, ...] = (
         client_id=MINIMAX_OAUTH_CLIENT_ID, scope=MINIMAX_OAUTH_SCOPE,
         extra={"region": "global", "cn_portal_base_url": MINIMAX_OAUTH_CN_BASE,
                "cn_inference_base_url": MINIMAX_OAUTH_CN_INFERENCE}),
-    # CLAUDE_CODE_OAUTH_TOKEN is NOT an API key despite auth_type="api_key": `claude setup-token`
-    # yields an `sk-ant-oat01…` OAuth token (401s as x-api-key, 429s as bare Bearer). It stays in
-    # this tuple because the tuple doubles as the credential-DISCOVERY list
-    # (agent/credential_pool.py builds its env scan from it); the adapter routes it down the OAuth
-    # path by prefix. Only ANTHROPIC_API_KEY and ANTHROPIC_TOKEN are usable as literal API keys.
-    ("anthropic", "Anthropic", "https://api.anthropic.com",
-     ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"), "ANTHROPIC_BASE_URL"),
+    # Two billing lanes on one backend (agent/anthropic_provider.py): ``anthropic`` bills a Console
+    # API key, ``anthropic-oauth`` a Claude Pro/Max subscription. The OAuth row keeps
+    # auth_type="api_key" although its tokens are OAuth (`claude setup-token` yields
+    # `sk-ant-oat01…`): the tuple doubles as the credential-DISCOVERY list
+    # (agent/credential_pool.py builds its env scan from it), and the adapter routes OAuth by prefix.
+    ("anthropic", "Anthropic", "https://api.anthropic.com", ("ANTHROPIC_API_KEY",), "ANTHROPIC_BASE_URL"),
+    ("anthropic-oauth", "Anthropic (Claude Pro/Max)", "https://api.anthropic.com",
+     ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"), "ANTHROPIC_BASE_URL"),
     ("alibaba", "Qwen Cloud", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
      ("DASHSCOPE_API_KEY",), "DASHSCOPE_BASE_URL"),
     ("alibaba-coding-plan", "Alibaba Cloud (Coding Plan)", "https://coding-intl.dashscope.aliyuncs.com/v1",
@@ -1232,10 +1233,10 @@ def _slot_selects(slot: Any, normalized: str) -> bool:
 def _config_selects_provider(normalized: str) -> bool:
     """config.yaml ``model.provider``, or a MoA advisor/aggregator slot naming the provider.
 
-    MoA presets are explicit model selections too: ``provider: anthropic`` in a MoA slot opts into
-    Anthropic credentials for that slot even when the main model is another provider; otherwise
-    Claude Code OAuth entries get pruned by ``load_pool("anthropic")`` and MoA advisors fail with
-    "no ANTHROPIC_API_KEY" while the picker says Anthropic is logged in."""
+    MoA presets are explicit model selections too: ``provider: anthropic-oauth`` in a MoA slot opts
+    into the subscription login for that slot even when the main model is another provider;
+    otherwise ``load_pool("anthropic-oauth")`` never seeds the Claude Code login and MoA advisors
+    fail while the picker says Anthropic is logged in."""
     from hermes_cli.config import load_config
     cfg = load_config()
     if _slot_selects(cfg.get("model"), normalized):
@@ -1461,7 +1462,7 @@ _PROVIDER_ALIASES: Dict[str, str] = {
     "minimax-portal": "minimax-oauth", "minimax-global": "minimax-oauth", "minimax_oauth": "minimax-oauth",
     "alibaba_coding": "alibaba-coding-plan", "alibaba-coding": "alibaba-coding-plan",
     "alibaba_coding_plan": "alibaba-coding-plan",
-    "claude": "anthropic", "claude-code": "anthropic",
+    "claude": "anthropic", "claude-code": "anthropic-oauth", "claude-oauth": "anthropic-oauth",
     "github": "copilot", "github-copilot": "copilot",
     "github-models": "copilot", "github-model": "copilot",
     "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",

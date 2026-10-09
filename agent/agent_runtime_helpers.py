@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from hermes_cli.timeouts import get_provider_request_timeout
+from agent.anthropic_provider import is_anthropic_provider, lane_accepts_token
 from agent.message_sanitization import (
     _FULL_ARGS_LOG_BOUND, coalesce_tool_call_id, coerce_tool_name, tool_call_id_variants, tool_result_id_variants
 )
@@ -795,7 +796,7 @@ def _is_entitlement_403(agent, status_code, error_context) -> bool:
     if "oauth authentication is currently not allowed for this organization" in haystack:
         return True
     provider = agent.provider or ""
-    if provider == "anthropic" and getattr(agent, "api_mode", "") == "anthropic_messages":
+    if is_anthropic_provider(provider) and getattr(agent, "api_mode", "") == "anthropic_messages":
         return True
     if provider == "xai-oauth":
         return not (
@@ -1318,7 +1319,7 @@ def restore_primary_runtime(agent) -> bool:
         # Default to native layout for snapshots predating the native-vs-proxy split.
         agent._use_native_cache_layout = rt.get(
             "use_native_cache_layout",
-            agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
+            agent.api_mode == "anthropic_messages" and is_anthropic_provider(agent.provider),
         )
         # An operator cache disable (_cache_disabled) must survive snapshot restoration.
         if getattr(agent, "_cache_disabled", False):
@@ -1692,7 +1693,7 @@ def anthropic_prompt_cache_policy(
     is_nous_portal = base_url_host_matches(eff_base_url, "nousresearch.com")
     is_anthropic_wire = eff_api_mode == "anthropic_messages"
     is_native_anthropic = is_anthropic_wire and (
-        eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com"
+        is_anthropic_provider(eff_provider) or base_url_hostname(eff_base_url) == "api.anthropic.com"
     )
     # Honor a configured route's per-model ``prompt_caching`` capability (explicit false too); only
     # for the two transports this planner handles, not Responses/Bedrock.
@@ -2078,9 +2079,12 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         from agent.anthropic_credentials import resolve_anthropic_token, anthropic_route_is_oauth
         # Only fall back to ANTHROPIC_TOKEN for native Anthropic; other anthropic_messages providers
         # must never receive Anthropic credentials.
-        is_native_anthropic = new_provider == "anthropic"
-        effective_key = api_key or agent.api_key or (
-            resolve_anthropic_token(model=getattr(agent, "model", None)) if is_native_anthropic else ""
+        is_native_anthropic = is_anthropic_provider(new_provider)
+        # A switch between the two Anthropic lanes must not carry the previous lane's key over.
+        carried_key = agent.api_key if not is_native_anthropic or lane_accepts_token(new_provider, agent.api_key) else ""
+        effective_key = api_key or carried_key or (
+            resolve_anthropic_token(model=getattr(agent, "model", None), provider=new_provider)
+            if is_native_anthropic else ""
         ) or ""
         # MiniMax OAuth: per-request callable token provider survives 15-min expiry (rationale in
         # agent_init.py).

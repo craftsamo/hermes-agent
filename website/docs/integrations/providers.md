@@ -18,7 +18,8 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **OpenAI Codex** | `hermes model` → **ChatGPT or Codex Subscription** (ChatGPT OAuth, uses Codex models) |
 | **GitHub Copilot** | `hermes model` (OAuth device code flow, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`) |
 | **GitHub Copilot ACP** | `hermes model` (spawns local `copilot --acp --stdio`) |
-| **Anthropic** | `hermes model` (Claude Max + extra usage credits via OAuth; also supports Anthropic API key or manual setup-token — see note below) |
+| **Anthropic API** | `ANTHROPIC_API_KEY` in `~/.hermes/.env`, `hermes auth add anthropic --type api-key`, or `hermes model` (provider: `anthropic`; Console API key, billed per token) |
+| **Anthropic (Claude Pro/Max)** | `hermes model` or `hermes auth add anthropic-oauth` (provider: `anthropic-oauth`; aliases: `claude-oauth`, `claude-code`; Claude Max + extra usage credits via OAuth, setup-token or Claude Code login — see note below) |
 | **OpenRouter** | `OPENROUTER_API_KEY` in `~/.hermes/.env`, or `hermes auth add openrouter --type oauth` (browser login via OpenRouter's PKCE flow; stores a key in the credential pool) |
 | **Ramp Router** | `RAMP_ROUTER_API_KEY` in `~/.hermes/.env` (provider: `router`; aliases: `ramp-router`, `ramp`, `router.com`; Responses-native gateway, live account-scoped catalog) |
 | **Fireworks AI** | `FIREWORKS_API_KEY` in `~/.hermes/.env` (provider: `fireworks`; aliases: `fireworks-ai`, `fw`) |
@@ -139,13 +140,13 @@ Several providers let you sign in to Hermes with a **consumer subscription** (Cl
 
 | Plan / path | Can Hermes use it? | What gets consumed | What does NOT get consumed | Common surprise |
 |---|---|---|---|---|
-| **Anthropic — Claude Max + OAuth** | ✅ Yes — `hermes model` → Anthropic OAuth. Requires Max **and** purchased extra usage credits | The **extra/overage credits** you've added on top of the Max plan | The **base Max plan allowance** (the usage included in Claude Code by default) | All Hermes usage bills as "extra usage" even while your included Max allowance sits untouched |
-| **Anthropic — Claude Pro** | ❌ No — Pro subscribers cannot use the OAuth path | Nothing (path unavailable) | Your Pro subscription | Pro looks like it should work; it doesn't. Use an `ANTHROPIC_API_KEY` instead (pay-per-token, independent of any Claude subscription) |
+| **Anthropic — Claude Max + OAuth** | ✅ Yes — provider `anthropic-oauth` (`hermes model` → Anthropic (Claude Pro/Max)). Requires Max **and** purchased extra usage credits | The **extra/overage credits** you've added on top of the Max plan | The **base Max plan allowance** (the usage included in Claude Code by default) | All Hermes usage bills as "extra usage" even while your included Max allowance sits untouched |
+| **Anthropic — Claude Pro** | ❌ No — Pro subscribers cannot use the OAuth path | Nothing (path unavailable) | Your Pro subscription | Pro looks like it should work; it doesn't. Use provider `anthropic` with an `ANTHROPIC_API_KEY` instead (pay-per-token, independent of any Claude subscription) |
 | **OpenAI Codex — ChatGPT plan OAuth** | ✅ Yes — `hermes model` → **ChatGPT or Codex Subscription** (ChatGPT OAuth device-code login, uses Codex models) | *Not currently documented* | *Not currently documented* | Docs cover auth and token refresh only; plan-quota semantics are not yet documented |
 | **xAI — SuperGrok / X Premium+ OAuth** | ✅ Yes — browser OAuth, no API key needed | Your **subscription quota** (documented explicitly for X Search: OAuth is preferred over an API key and "uses your subscription quota instead of API spend"). Inference quota semantics beyond that: *not currently documented* | `XAI_API_KEY` / pay-per-token API spend, when OAuth credentials are configured and preferred | `HTTP 403` after a successful login — xAI has restricted OAuth API access to specific SuperGrok tiers despite an active in-app subscription |
 | **Google — Gemini consumer plan (Google AI Pro / Ultra)** | ❌ No documented path — the `gemini` provider is API-key only (`GOOGLE_API_KEY` / `GEMINI_API_KEY`); Vertex AI uses GCP billing | Your **API key's quota** (free tier or billing-enabled Google Cloud project) — *consumer-plan consumption not currently documented* | *Not currently documented* | Free-tier keys can be exhausted after a handful of agent turns, because Hermes may make several model calls per user turn |
 
-**Anthropic.** The OAuth path routes as Claude Code against your Anthropic account and **only works on a Claude Max plan with purchased extra usage credits** — the base Max allowance is never consumed by Hermes, only the extra/overage credits on top. Claude Pro subscribers cannot use this path; the supported alternative is an `ANTHROPIC_API_KEY`, billed pay-per-token against that key's organization at standard API pricing. See [Anthropic (Native)](#anthropic-native) below.
+**Anthropic.** The subscription lane (`anthropic-oauth`) routes as Claude Code against your Anthropic account and **only works on a Claude Max plan with purchased extra usage credits** — the base Max allowance is never consumed by Hermes, only the extra/overage credits on top. Claude Pro subscribers cannot use this path; the supported alternative is the `anthropic` provider with an `ANTHROPIC_API_KEY`, billed pay-per-token against that key's organization at standard API pricing (Console credits included). See [Anthropic (Native)](#anthropic-native) below.
 
 **OpenAI Codex.** Hermes authenticates via ChatGPT device-code OAuth, stores credentials in `~/.hermes/auth.json`, and can import existing Codex CLI credentials from `~/.codex/auth.json`. Which ChatGPT plan tiers are eligible, and how Hermes usage counts against your plan's Codex limits, are **not currently documented** — the Codex note under [Nous Portal](#nous-portal) covers authentication and token-refresh behavior only.
 
@@ -159,11 +160,20 @@ If you'd rather not track per-provider plan semantics at all, [Nous Portal](#nou
 
 ### Anthropic (Native)
 
-Use Claude models directly through the Anthropic API — no OpenRouter proxy needed. Supports three auth methods:
+Use Claude models directly through the Anthropic API — no OpenRouter proxy needed. Anthropic is two providers that share the same models, endpoint, prompt caching and pricing table but bill different accounts:
 
-When no explicit environment credential is selected, Hermes-owned OAuth grants
-in the credential pool take precedence over a borrowed Claude Code login. The
-borrowed login remains the fallback when no owned OAuth grant is available —
+| Provider | Bills | Credentials |
+|---|---|---|
+| `anthropic` | A Console API key (pay-per-token, monthly Console credits included) | `ANTHROPIC_API_KEY`, or `hermes auth add anthropic --type api-key` |
+| `anthropic-oauth` | A Claude Pro/Max subscription (extra usage credits) | `hermes auth add anthropic-oauth` (Hermes login), a Claude Code login, `ANTHROPIC_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` |
+
+Each provider refuses the other's kind of credential: a subscription token is never sent on the `anthropic` lane and a Console key never on the `anthropic-oauth` lane, so one never silently bills the other. Because they are separate providers, you choose the billing account per model, per auxiliary task (`auxiliary.<task>.provider`) and per `fallback_providers` entry — for example, the subscription as the main model with the API key as its fallback.
+
+Both providers keep a credential pool, so either can hold several accounts. Add each one with `hermes auth add` (a `--label` helps tell them apart); when one is exhausted or rate-limited, Hermes rotates to the next. `hermes auth priority <provider> <label> <n>` sets the order.
+
+On `anthropic-oauth`, Hermes-owned OAuth grants in the credential pool take
+precedence over a borrowed Claude Code login. The borrowed login remains the
+fallback when no owned OAuth grant is available —
 unless `auth.adopt_external_logins: false` is set, in which case Hermes never
 reads or refreshes Claude Code's credentials (see
 [Borrowed CLI logins](../user-guide/security.md#borrowed-cli-logins)).
@@ -172,39 +182,50 @@ request, not an unrelated ambient login; rotating a borrowed login can otherwise
 invalidate its owner's refresh token.
 
 :::caution Requires Claude Max "extra usage" credits
-When you authenticate via `hermes model` → Anthropic OAuth (or via `hermes auth add anthropic --type oauth`), Hermes routes as Claude Code against your Anthropic account. **It only works if you're on a Claude Max plan and have purchased extra usage credits.** The base Max plan allowance (the usage included in Claude Code by default) is not consumed by Hermes — only the extra/overage credits you've added on top are. Claude Pro subscribers cannot use this path.
+When you authenticate via `hermes model` → Anthropic (Claude Pro/Max) (or via `hermes auth add anthropic-oauth`), Hermes routes as Claude Code against your Anthropic account. **It only works if you're on a Claude Max plan and have purchased extra usage credits.** The base Max plan allowance (the usage included in Claude Code by default) is not consumed by Hermes — only the extra/overage credits you've added on top are. Claude Pro subscribers cannot use this path.
 
-If you don't have Max + extra credits, use an `ANTHROPIC_API_KEY` instead — requests are billed pay-per-token against that key's organization (standard API pricing, independent of any Claude subscription).
+If you don't have Max + extra credits, use the `anthropic` provider with an `ANTHROPIC_API_KEY` instead — requests are billed pay-per-token against that key's organization (standard API pricing, independent of any Claude subscription).
 :::
 
 ```bash
-# With an API key (pay-per-token)
+# API key (pay-per-token)
 export ANTHROPIC_API_KEY=***
 hermes chat --provider anthropic --model claude-sonnet-4-6
 
-# Preferred: authenticate through `hermes model`
-# Hermes will use Claude Code's credential store directly when available
-hermes model
+# Several Console organizations, used in order
+hermes auth add anthropic --type api-key --label main
+hermes auth add anthropic --type api-key --label sub
 
-# Manual override with a setup-token (fallback / legacy)
+# Claude Pro/Max subscription: `hermes model`, or a Hermes login per account
+hermes auth add anthropic-oauth --label max-main
+hermes chat --provider anthropic-oauth
+
+# Manual setup-token (fallback / legacy)
 export ANTHROPIC_TOKEN=***  # setup-token or manual OAuth token
-hermes chat --provider anthropic
+hermes chat --provider anthropic-oauth
 
 # Auto-detect Claude Code credentials (if you already use Claude Code)
-hermes chat --provider anthropic  # reads Claude Code credential files automatically
+hermes chat --provider anthropic-oauth  # reads Claude Code credential files automatically
 ```
 
-When you choose Anthropic OAuth through `hermes model`, Hermes prefers Claude Code's own credential store over copying the token into `~/.hermes/.env`. That keeps refreshable Claude credentials refreshable.
+When you choose Anthropic (Claude Pro/Max) through `hermes model`, Hermes prefers Claude Code's own credential store over copying the token into `~/.hermes/.env`. That keeps refreshable Claude credentials refreshable.
 
 Or set it permanently:
 ```yaml
 model:
-  provider: "anthropic"
+  provider: "anthropic-oauth"   # or "anthropic" for the API key
   default: "claude-sonnet-4-6"
+fallback_providers:
+  - provider: anthropic         # bill the API key when the subscription is exhausted
+    model: claude-sonnet-4-6
 ```
 
 :::tip Aliases
-`--provider claude` and `--provider claude-code` also work as shorthand for `--provider anthropic`.
+`--provider claude` is shorthand for `--provider anthropic`; `--provider claude-oauth` and `--provider claude-code` are shorthand for `--provider anthropic-oauth`.
+:::
+
+:::note Upgrading from a single `anthropic` provider
+`anthropic` used to accept subscription tokens too. A config that relied on a Claude Code login, `ANTHROPIC_TOKEN` or a `hermes auth add anthropic --type oauth` login must now name `provider: anthropic-oauth`. OAuth rows already stored under `anthropic` are skipped (with a warning) until they are re-added with `hermes auth add anthropic-oauth`.
 :::
 
 ### GitHub Copilot

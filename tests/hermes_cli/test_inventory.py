@@ -233,7 +233,7 @@ def test_explicit_only_filters_ambient_credentials_but_keeps_current_and_custom_
 
 
 def test_explicit_only_keeps_anthropic_row_with_oauth_credentials():
-    """Anthropic OAuth logins are deliberate sign-ins, not ambient credentials.
+    """Anthropic-oauth (subscription) logins are deliberate sign-ins, not ambient credentials.
 
     Claude Code (~/.claude/.credentials.json) and Hermes' own device flow
     leave no trace in active_provider / model.provider / API-key env vars,
@@ -242,7 +242,7 @@ def test_explicit_only_keeps_anthropic_row_with_oauth_credentials():
     building the row. The desktop explicit-only filter must keep it.
     """
     rows = [
-        {"slug": "anthropic", "name": "Anthropic", "models": ["claude-sonnet-5"],
+        {"slug": "anthropic-oauth", "name": "Anthropic (Claude Pro/Max)", "models": ["claude-sonnet-5"],
          "total_models": 1, "is_current": False, "is_user_defined": False,
          "source": "hermes"},
         {"slug": "copilot", "name": "Copilot", "models": ["gpt-5.4"],
@@ -265,7 +265,7 @@ def test_explicit_only_keeps_anthropic_row_with_oauth_credentials():
         payload = build_models_payload(ctx, explicit_only=True)
 
     slugs = [row["slug"] for row in payload["providers"]]
-    assert "anthropic" in slugs, (
+    assert "anthropic-oauth" in slugs, (
         "Anthropic OAuth login must survive the explicit-only filter"
     )
     assert "copilot" not in slugs, (

@@ -86,7 +86,7 @@ def _build_apikey_providers_list() -> list:
     _known_names = {t[0] for t in _static}
     # Providers with a dedicated health check (custom headers/auth): skip their pluggable profiles so
     # the generic Bearer loop doesn't run a duplicate, broken check (Anthropic needs x-api-key).
-    _dedicated_canonical = {"anthropic", "openrouter", "bedrock"}
+    _dedicated_canonical = {"anthropic", "anthropic-oauth", "openrouter", "bedrock"}
     # Canonical profile names of the static rows, so profiles without a display_name don't duplicate.
     _known_canonical = {
         "zai", "kimi-coding", "stepfun", "kimi-coding-cn", "arcee", "gmi", "deepseek", "huggingface", "nvidia",
@@ -149,10 +149,13 @@ def _probe_openrouter() -> ProbeResult:
     return _row(name, "fail", detail, [issue] if issue else None)
 
 
-def _probe_anthropic() -> ProbeResult:
-    name = "Anthropic API"
-    from hermes_cli.auth import get_anthropic_key
-    key = get_anthropic_key()
+def _probe_anthropic(name: str = "Anthropic API", provider: str = "anthropic") -> ProbeResult:
+    """One billing lane's env credential (``ANTHROPIC_API_KEY`` or ``ANTHROPIC_TOKEN`` /
+    ``CLAUDE_CODE_OAUTH_TOKEN``), read only from the env so doctor never refreshes a login."""
+    from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.config import get_env_value_prefer_dotenv
+    key = next((v for v in (get_env_value_prefer_dotenv(var) or ""
+                            for var in PROVIDER_REGISTRY[provider].api_key_env_vars) if v), "")
     if not key:
         return _skip(name)
     try:
@@ -415,6 +418,7 @@ def build_probes() -> list:
     return [
         ("IPv6 route", _probe_ipv6_path),
         ("OpenRouter API", _probe_openrouter), ("Anthropic API", _probe_anthropic),
+        ("Anthropic (Claude Pro/Max)", functools.partial(_probe_anthropic, "Anthropic (Claude Pro/Max)", "anthropic-oauth")),
         # functools.partial binds each row's args so every callable keeps its own provider.
         *((row[0], functools.partial(_probe_apikey_provider, *row)) for row in _APIKEY_PROVIDERS_CACHE),
         ("AWS Bedrock", _probe_bedrock), ("Azure Foundry (Entra ID)", _probe_azure_entra),

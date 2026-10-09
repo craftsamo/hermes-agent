@@ -1960,9 +1960,9 @@ def test_auto_provider_with_known_cloud_base_url_still_uses_anthropic(monkeypatc
 
     The local-endpoint bypass only applies to non-cloud endpoints; when the
     configured base_url IS a cloud API root, resolve_provider() must run
-    normally and pick up ANTHROPIC_API_KEY.
+    normally and pick up an API-shaped ANTHROPIC_API_KEY.
     """
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-fake-key")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

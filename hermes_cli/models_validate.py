@@ -517,7 +517,8 @@ def _validate_anthropic(req: _Request) -> Optional[dict[str, Any]]:
     resolvable or the network failed."""
     from hermes_cli import models as _m
 
-    models = _m._fetch_anthropic_models(base_url=req.base_url or None, api_key=req.api_key or None)
+    models = _m._fetch_anthropic_models(base_url=req.base_url or None, api_key=req.api_key or None,
+                                        provider=req.normalized)
     if models is None:
         return None
     match = _match_in_catalog(req.lookup, models, suggest_query=req.requested)
@@ -767,7 +768,7 @@ _LADDER: tuple[tuple[Callable[[_Request], bool], Callable[[_Request], Optional[d
     (_for("openai-codex", "xai-oauth"), _validate_static_catalog),
     (_for("minimax", "minimax-cn"), _validate_minimax),
     (_for("llamacpp", "llama.cpp", "llama-cpp"), _validate_managed_local),
-    (_for("anthropic"), _validate_anthropic),
+    (_for("anthropic", "anthropic-oauth"), _validate_anthropic),
     (lambda req: req.api_mode == "anthropic_messages", _validate_anthropic_messages),
     (lambda req: True, _validate_external_process),
     (lambda req: True, _validate_live_listing),

@@ -2826,27 +2826,21 @@ def remove_env_value(key: str) -> bool:
     return found
 
 
-def _write_anthropic_slots(token: str, api_key: str, save_fn=None, *, token_first: bool = True):
-    """Write both Anthropic credential slots (one holds the value, the other is cleared)."""
-    writer = save_fn or save_env_value
-    order = (("ANTHROPIC_TOKEN", token), ("ANTHROPIC_API_KEY", api_key))
-    for name, value in order if token_first else reversed(order):
-        writer(name, value)
-
-
+# The two Anthropic billing lanes keep independent slots: ``anthropic-oauth`` reads ANTHROPIC_TOKEN,
+# ``anthropic`` reads ANTHROPIC_API_KEY. Saving one never clears the other.
 def save_anthropic_oauth_token(value: str, save_fn=None):
-    """Persist an Anthropic OAuth/setup token and clear the API-key slot."""
-    _write_anthropic_slots(value, "", save_fn)
+    """Persist an Anthropic OAuth/setup token for the subscription lane."""
+    (save_fn or save_env_value)("ANTHROPIC_TOKEN", value)
 
 
 def use_anthropic_claude_code_credentials(save_fn=None):
-    """Use Claude Code's own credential files instead of persisting env tokens."""
-    _write_anthropic_slots("", "", save_fn)
+    """Use Claude Code's own credential files instead of a persisted subscription token."""
+    (save_fn or save_env_value)("ANTHROPIC_TOKEN", "")
 
 
 def save_anthropic_api_key(value: str, save_fn=None):
-    """Persist an Anthropic API key and clear the OAuth/setup-token slot."""
-    _write_anthropic_slots("", value, save_fn, token_first=False)
+    """Persist an Anthropic Console API key for the API-key lane."""
+    (save_fn or save_env_value)("ANTHROPIC_API_KEY", value)
 
 
 def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:

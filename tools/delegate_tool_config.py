@@ -339,7 +339,10 @@ def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
     if host == "chatgpt.com" and "/backend-api/codex" in base_lower:
         provider, api_mode = "openai-codex", "codex_responses"
     elif host == "api.anthropic.com":
-        provider, api_mode = "anthropic", "anthropic_messages"
+        from agent.anthropic_credentials import _is_oauth_token
+        # The key decides the billing lane: a subscription token is never labelled as the API lane.
+        provider = "anthropic-oauth" if _is_oauth_token(str(v.get("api_key") or "")) else "anthropic"
+        api_mode = "anthropic_messages"
     elif "api.kimi.com/coding" in base_lower:
         api_mode = "anthropic_messages"
     # Explicit delegation.api_mode always wins over the URL heuristic; a provider plugin's

@@ -647,7 +647,7 @@ _ERROR_CODE_VERDICTS: Dict[str, Verdict] = {
 # types, OpenAI's ``server_error``. Scoped per provider so a coincidentally named
 # code from another backend stays ``unknown`` (#70414). Provider aliases collapse
 # to the family key before lookup.
-_PROVIDER_CODE_FAMILIES = {"openai-codex": "openai", "google": "gemini", "google-gemini": "gemini",
+_PROVIDER_CODE_FAMILIES = {"openai-codex": "openai", "anthropic-oauth": "anthropic", "google": "gemini", "google-gemini": "gemini",
                            "google-ai-studio": "gemini", "vertex": "gemini", "google-vertex": "gemini"}
 _PROVIDER_CODE_VERDICTS: Dict[str, Dict[str, Verdict]] = {
     "openai": {"server_error": _V_SERVER_ERROR},

@@ -11,6 +11,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from agent.anthropic_provider import is_anthropic_provider
+
 if TYPE_CHECKING:
     from agent.credential_pool import PooledCredential
 
@@ -70,7 +72,7 @@ class CredentialPoolModelCooldownMixin:
         if failure_reason == "model_entitlement":
             return True
         return (
-            self.provider == "anthropic" and status_code == 429
+            is_anthropic_provider(self.provider) and status_code == 429
             and failure_reason not in (FAILURE_REASON_BILLING, FAILURE_REASON_BILLING_UNVERIFIED)
         )
 
