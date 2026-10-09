@@ -116,6 +116,7 @@ def aux_probe_mode():
         _aux_probe_state.active = prev
 
 
+from agent.anthropic_provider import is_anthropic_provider
 from agent.credential_pool import load_pool
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
 from hermes_cli.config import get_hermes_home
@@ -820,6 +821,7 @@ _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
     "gemini": "gemini-3.6-flash", "zai": "glm-4.5-flash", "kimi-coding": "kimi-k2-turbo-preview",
     "stepfun": "step-3.5-flash", "kimi-coding-cn": "kimi-k2-turbo-preview",
     "gmi": "google/gemini-3.1-flash-lite-preview", "anthropic": "claude-haiku-4-5-20251001",
+    "anthropic-oauth": "claude-haiku-4-5-20251001",
     "ai-gateway": "google/gemini-3-flash", "opencode-zen": "gemini-3-flash", "opencode-go": "glm-5",
     "kilocode": "google/gemini-3.6-flash", "ollama-cloud": "nemotron-3-nano:30b",
     "tencent-tokenhub": "hy4-preview", "tencent-tokenplan": "hy4-preview",
@@ -2163,13 +2165,17 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
         if _is_provider_unhealthy(provider_id):
             logger.debug("Auxiliary api-key chain: %s is unhealthy, skipping", provider_id)
             continue
-        if provider_id == "anthropic":
-            # Explicit-config gate: Claude Code credentials must not silently become aux fallback.
+        if is_anthropic_provider(provider_id):
+            # Explicit-config gate: Claude Code credentials must not silently become aux fallback,
+            # and neither billing lane is used unless the user chose it.
             with contextlib.suppress(ImportError):
                 from hermes_cli.auth import is_provider_explicitly_configured
-                if not is_provider_explicitly_configured("anthropic"):
+                if not is_provider_explicitly_configured(provider_id):
                     continue
-            return _try_anthropic()
+            client, model = _try_anthropic(provider=provider_id)
+            if client is not None:
+                return client, model
+            continue
         if provider_id == "copilot":
             # Explicit-config gate: ambient gh-CLI credentials must not silently become aux fallback (#114740).
             with contextlib.suppress(ImportError):
@@ -3018,22 +3024,29 @@ def _try_azure_foundry(
 
 
 def _try_anthropic(explicit_api_key: Optional[Union[str, Callable[[], str]]] = None,
-                   explicit_base_url: Optional[str] = None) -> Tuple[Optional[Any], Optional[str]]:
+                   explicit_base_url: Optional[str] = None,
+                   provider: str = "anthropic") -> Tuple[Optional[Any], Optional[str]]:
+    """Native Anthropic aux client on one billing lane (``anthropic`` API key / ``anthropic-oauth``)."""
     try:
         from agent.anthropic_adapter import build_anthropic_client
         from agent.anthropic_credentials import resolve_anthropic_token
     except ImportError:
         return None, None
-    pool_present, entry = _select_pool_entry("anthropic")
+    from agent.anthropic_provider import lane_accepts_token
+    if isinstance(explicit_api_key, str) and explicit_api_key and not lane_accepts_token(provider, explicit_api_key):
+        logger.warning("Auxiliary client: refusing the explicit key for %s — it belongs to the other "
+                       "Anthropic billing lane; no client built and no request sent.", provider)
+        return None, None
+    pool_present, entry = _select_pool_entry(provider)
     if pool_present and entry is not None:
         token = explicit_api_key or _pool_runtime_api_key(entry)
     else:
         # Pool absent/empty: legacy resolver so a dead pool entry can't wedge aux tasks when a standalone credential exists.
         entry = None
-        token = explicit_api_key or resolve_anthropic_token()
+        token = explicit_api_key or resolve_anthropic_token(provider=provider)
     if not token:
         return None, None
-    # Honor config.yaml model.base_url only when provider is anthropic AND the URL is
+    # Honor config.yaml model.base_url only when provider is this lane AND the URL is
     # Anthropic-compatible; a foreign host (Codex, OpenRouter) would 401 every aux call.
     base_url = _pool_runtime_base_url(entry, _ANTHROPIC_DEFAULT_BASE_URL) if pool_present else _ANTHROPIC_DEFAULT_BASE_URL
     with contextlib.suppress(Exception):
@@ -3042,7 +3055,7 @@ def _try_anthropic(explicit_api_key: Optional[Union[str, Callable[[], str]]] = N
         model_cfg = cfg.get("model")
         if isinstance(model_cfg, dict):
             cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-            if cfg_provider == "anthropic":
+            if cfg_provider == provider:
                 cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
                 if cfg_base_url and _is_anthropic_compatible_host(cfg_base_url):
                     base_url = cfg_base_url
@@ -3063,7 +3076,7 @@ def _try_anthropic(explicit_api_key: Optional[Union[str, Callable[[], str]]] = N
         base_url = override_url
     from agent.anthropic_credentials import _is_oauth_token
     is_oauth = _is_oauth_token(token)
-    model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
+    model = _get_aux_model_for_provider(provider) or "claude-haiku-4-5-20251001"
     if _aux_probe_active():
         # Probe: token + adapter import resolved; skip real client construction.
         return _AuxProbeClientStub(api_key="", base_url=base_url), model
@@ -3677,6 +3690,8 @@ def _recoverable_pool_provider(
     if normalized not in {"", "auto", "custom"}:
         return normalized
     known = _provider_for_host(base, _POOL_PROVIDER_BY_HOST)
+    if known == "anthropic":
+        known = _anthropic_lane_for_key(_effective_provider_for_client(client, ""), client_key)
     if known is not None:
         return known
     # Providers outside the table (e.g. opencode-go): match base URL against registered
@@ -3829,11 +3844,12 @@ def _refresh_nous_credentials() -> bool:
 
 
 def _refresh_anthropic_credentials(failed_api_key: str = "") -> bool:
-    from agent.anthropic_credentials import read_claude_code_credentials, _refresh_oauth_token
+    from agent.anthropic_credentials import _is_oauth_token, read_claude_code_credentials, _refresh_oauth_token
     token = failed_api_key
     if not token:
         return False
-    pool = load_pool("anthropic")
+    # The failed key's shape names its billing lane; only the subscription lane has refreshable grants.
+    pool = load_pool("anthropic-oauth" if _is_oauth_token(token) else "anthropic")
     if pool.entry_id_for_api_key(token):
         return pool.try_refresh_matching(api_key_hint=token) is not None
     creds = read_claude_code_credentials()
@@ -3867,6 +3883,7 @@ def _refresh_vertex_credentials() -> bool:
 _CREDENTIAL_REFRESHERS: Dict[str, Callable[..., bool]] = {
     "copilot": _refresh_copilot_credentials, "openai-codex": _refresh_codex_credentials,
     "nous": _refresh_nous_credentials, "anthropic": _refresh_anthropic_credentials,
+    "anthropic-oauth": _refresh_anthropic_credentials,
     "xai-oauth": _refresh_xai_oauth_credentials, "vertex": _refresh_vertex_credentials,
 }
 
@@ -3878,7 +3895,7 @@ def _refresh_provider_credentials(provider: str, *, failed_api_key: str = "") ->
     if refresher is None:
         return False
     try:
-        if not (refresher(failed_api_key) if normalized == "anthropic" else refresher()):
+        if not (refresher(failed_api_key) if is_anthropic_provider(normalized) else refresher()):
             return False
         _evict_cached_clients(normalized)
         return True
@@ -3887,8 +3904,19 @@ def _refresh_provider_credentials(provider: str, *, failed_api_key: str = "") ->
         return False
 
 
+def _anthropic_lane_for_key(effective_provider: str, api_key: Any) -> str:
+    """Billing lane behind an ``api.anthropic.com`` client: the client's own Anthropic lane when it
+    has one, else the lane its key's shape names. The host alone cannot tell the two apart."""
+    effective = _normalize_aux_provider(effective_provider)
+    if is_anthropic_provider(effective):
+        return effective
+    from agent.anthropic_credentials import _is_oauth_token
+    return "anthropic-oauth" if isinstance(api_key, str) and _is_oauth_token(api_key) else "anthropic"
+
+
 def _auth_refresh_provider_for_route(
     resolved_provider: Optional[str], client_base_url: str, effective_provider: str = "",
+    api_key: Any = None,
 ) -> str:
     """Provider whose short-lived credentials should be refreshed; auto-routed calls keep
     ``resolved_provider == "auto"``, so infer the backend from the client's base URL."""
@@ -3896,6 +3924,9 @@ def _auth_refresh_provider_for_route(
     if normalized and normalized != "auto":
         return normalized
     host_provider = _provider_for_host(client_base_url, _AUTH_REFRESH_PROVIDER_BY_HOST)
+    if host_provider == "anthropic":
+        # A retry rebuilt on the wrong lane would bill the other account (or fail outright).
+        return _anthropic_lane_for_key(effective_provider, api_key)
     # The auto client already knows it runs on the host's API-key sibling (``xai`` on api.x.ai):
     # an XAI_API_KEY 401 must not spend a stale ``xai-oauth`` grant's refresh and switch routes.
     if host_provider and host_provider == f"{_normalize_aux_provider(effective_provider)}-oauth":
@@ -4088,8 +4119,9 @@ def _plan_fallback_auth_retry(
 ) -> Tuple[str, Optional[Tuple[Any, Dict[str, Any], _FallbackDestination]]]:
     """After an auth error on a fallback candidate: refresh credentials and rebuild the request.
     Returns ``(refresh_provider, retry)``; ``retry`` = ``(client, kwargs, destination)`` or None."""
-    fb_provider = _auth_refresh_provider_for_route(destination.provider, destination.base_url)
-    refresh_kwargs = {"failed_api_key": failed_api_key} if fb_provider == "anthropic" else {}
+    fb_provider = _auth_refresh_provider_for_route(destination.provider, destination.base_url,
+                                                   api_key=failed_api_key)
+    refresh_kwargs = {"failed_api_key": failed_api_key} if is_anthropic_provider(fb_provider) else {}
     if fb_provider not in {"auto", "", None} and _refresh_provider_credentials(fb_provider, **refresh_kwargs):
         retry_client, retry_model = _get_cached_client(
             fb_provider, destination.model, **({"async_mode": True} if async_mode else {}),
@@ -5254,11 +5286,11 @@ def _api_key_profile_supplied_client(provider: str, **client_kwargs: Any) -> Any
 def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: Callable) -> _ResolveResult:
     """PROVIDER_REGISTRY ``api_key`` providers (Anthropic via its own resolver), honouring explicit overrides."""
     provider = req.provider
-    if provider == "anthropic":
+    if is_anthropic_provider(provider):
         client, default_model = _try_anthropic(explicit_api_key=req.explicit_api_key,
-                                               explicit_base_url=req.explicit_base_url)
+                                               explicit_base_url=req.explicit_base_url, provider=provider)
         return _route_or_warn(req, client, default_model,
-                              "resolve_provider_client: anthropic requested but no Anthropic credentials found")
+                              f"resolve_provider_client: {provider} requested but no credentials found for that lane")
     creds = resolve_creds(provider)
     api_key = str(creds.get("api_key", "")).strip()
     # Explicit api_key override (fallback_model / custom_providers entry) lets callers
@@ -5538,6 +5570,7 @@ _STRICT_VISION_BACKENDS: Dict[str, Callable[[Optional[str]], Tuple[Optional[Any]
     "nous": lambda model: resolve_provider_client("nous", model, is_vision=True),
     "openai-codex": lambda model: resolve_provider_client("openai-codex", model, is_vision=True),
     "anthropic": lambda model: _try_anthropic(),
+    "anthropic-oauth": lambda model: _try_anthropic(provider="anthropic-oauth"),
     "deepinfra": _deepinfra_strict_vision_backend,
     "custom": lambda model: _try_custom_endpoint(),
 }
@@ -6069,7 +6102,8 @@ def _preserve_provider_with_base_url(prov: Optional[str]) -> bool:
         return get_provider(normalized) is not None
     except Exception:  # keep provider-backed routes safe when the catalog can't load
         return normalized in {
-            "anthropic", "copilot", "copilot-acp", "minimax-oauth", "nous", "openai-codex", "qwen-oauth", "xai-oauth",
+            "anthropic", "anthropic-oauth", "copilot", "copilot-acp", "minimax-oauth", "nous", "openai-codex",
+            "qwen-oauth", "xai-oauth",
         }
 
 
@@ -6724,7 +6758,7 @@ def _build_call_kwargs(
     if reasoning_config and isinstance(reasoning_config, dict):
         raw_base = base_url or ""
         if (
-            provider_norm == "anthropic" or projection.messages_wire or _nous_on_messages_wire(provider_norm, model)
+            is_anthropic_provider(provider_norm) or projection.messages_wire or _nous_on_messages_wire(provider_norm, model)
             or _endpoint_speaks_anthropic_messages(raw_base) or _is_anthropic_compat_endpoint(provider_norm, raw_base)
         ):
             kwargs["_reasoning_config"] = dict(reasoning_config)
@@ -7613,11 +7647,12 @@ def _ladder_credential_rungs(
     Returns ``(response, None)`` or ``(None, first_err)`` to fall through."""
     client, task, tag, resolved_provider = route.client, route.task, route.tag, route.resolved_provider
     auth_refresh_provider = _auth_refresh_provider_for_route(
-        resolved_provider, route.base_info, _effective_provider_for_client(client, ""))
+        resolved_provider, route.base_info, _effective_provider_for_client(client, ""),
+        api_key=getattr(client, "api_key", None))
     if (_is_auth_error(first_err) and auth_refresh_provider not in {"auto", "", None}
             and not client_is_nous):
         refresh_kwargs = ({"failed_api_key": getattr(client, "api_key", "")}
-                          if auth_refresh_provider == "anthropic" else {})
+                          if is_anthropic_provider(auth_refresh_provider) else {})
         if _refresh_provider_credentials(auth_refresh_provider, **refresh_kwargs):
             if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
                 # The stale client is cached under the route label (e.g. "auto"), not the

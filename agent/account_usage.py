@@ -586,15 +586,21 @@ def redeem_codex_reset_credit(
     return _codex_reset_outcome(body, available)
 
 
+def _anthropic_api_key_account_usage(
+    base_url: Optional[str] = None, api_key: Optional[str] = None
+) -> Optional[AccountUsageSnapshot]:
+    """The API-key lane has no account-limit endpoint; its spend lives in the Console."""
+    return _snapshot("anthropic", "oauth_usage_api", [], [],
+                     unavailable_reason="Anthropic account limits are only available for Claude Pro/Max "
+                                        "subscriptions (provider anthropic-oauth).")
+
+
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:
-    token = (resolve_anthropic_token() or "").strip()
-    if not token:
+    token = (resolve_anthropic_token(provider="anthropic-oauth") or "").strip()
+    if not token or not _is_oauth_token(token):
         return None
-    if not _is_oauth_token(token):
-        return _snapshot("anthropic", "oauth_usage_api", [], [],
-                         unavailable_reason="Anthropic account limits are only available for OAuth-backed Claude accounts.")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
     payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
@@ -607,7 +613,7 @@ def _fetch_anthropic_account_usage(
     used_credits, monthly_limit = extra.get("used_credits"), extra.get("monthly_limit")
     if extra.get("is_enabled") and _is_num(used_credits) and _is_num(monthly_limit):
         details.append(f"Extra usage: {used_credits:.2f} / {monthly_limit:.2f} {extra.get('currency') or 'USD'}")
-    return _snapshot("anthropic", "oauth_usage_api", windows, details)
+    return _snapshot("anthropic-oauth", "oauth_usage_api", windows, details)
 
 
 def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
@@ -648,7 +654,8 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
 
 
 _USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[AccountUsageSnapshot]]] = {
-    "openai-codex": _fetch_codex_account_usage, "anthropic": _fetch_anthropic_account_usage,
+    "openai-codex": _fetch_codex_account_usage, "anthropic": _anthropic_api_key_account_usage,
+    "anthropic-oauth": _fetch_anthropic_account_usage,
     "openrouter": _fetch_openrouter_account_usage,
 }
 

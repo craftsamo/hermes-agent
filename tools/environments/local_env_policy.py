@@ -74,7 +74,7 @@ def _build_provider_env_blocklist() -> frozenset:
                 blocked.add(name)
     except ImportError:
         pass
-    # CLAUDE_CODE_OAUTH_TOKEN (via the anthropic registry entry) belongs to the user's
+    # CLAUDE_CODE_OAUTH_TOKEN (via the anthropic-oauth registry entry) belongs to the user's
     # Claude Code install, not Hermes: stripping it made agent-spawned ``claude`` CLIs
     # fall through to the shared Keychain / ~/.claude store and, on auth failure, wipe
     # it — logging the user out. BUZZ_* is deliberately NOT discarded: this list feeds
@@ -83,7 +83,7 @@ def _build_provider_env_blocklist() -> frozenset:
     # (``_is_terminal_first_party_env``).
     # It is set and owned by the user's Claude Code install (subscription OAuth), not a Hermes-managed
     # inference credential — Claude subscription auth is not a working Hermes provider path. It arrives via
-    # the registry loop above (anthropic api_key_env_vars), so remove it explicitly. See #55878.
+    # the registry loop above (anthropic-oauth api_key_env_vars), so remove it explicitly. See #55878.
     blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")
     # BUZZ_* is deliberately NOT discarded here, even for Buzz-managed agents (BUZZ_MANAGED_AGENT set by the
     # buzz-acp harness). See #76243, #78026, #78065, #78511.

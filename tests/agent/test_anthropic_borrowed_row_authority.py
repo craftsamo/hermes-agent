@@ -93,7 +93,7 @@ def claude_credentials(tmp_path, monkeypatch):
 
 def _persisted_rows(home):
     store = json.loads((home / "auth.json").read_text(encoding="utf-8"))
-    return store.get("credential_pool", {}).get("anthropic", [])
+    return store.get("credential_pool", {}).get("anthropic-oauth", [])
 
 
 def _claude_pair(cred_path):
@@ -117,7 +117,7 @@ def test_persisted_claude_code_row_carries_no_token_material(
     Every other test in this file only means something if the disk row is
     token-less, so assert the boundary rather than assuming it.
     """
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
 
     live = [e for e in pool._entries if e.source == "claude_code"]
     assert len(live) == 1
@@ -130,12 +130,12 @@ def test_persisted_claude_code_row_carries_no_token_material(
     assert not rows[0].get("access_token")
     assert not rows[0].get("refresh_token")
     assert str(rows[0].get("secret_fingerprint", "")).startswith("sha256:")
-    assert sanitize_borrowed_credential_payload(rows[0], "anthropic") == rows[0]
+    assert sanitize_borrowed_credential_payload(rows[0], "anthropic-oauth") == rows[0]
 
 
 def test_pool_store_sync_never_adopts_a_borrowed_row(hermes_home, claude_credentials):
     """The sanitized row must not be mistaken for a rotation by another process."""
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     entry = next(e for e in pool._entries if e.source == "claude_code")
 
     synced = pool._sync_anthropic_entry_from_pool_store(entry)
@@ -170,7 +170,7 @@ def test_refresh_from_persisted_sanitized_row_keeps_the_full_pair(
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _counting_refresh)
     monkeypatch.setattr(AA, "_write_claude_code_credentials", _counting_write)
 
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     entry = next(e for e in pool._entries if e.source == "claude_code")
 
     refreshed = pool._refresh_entry(entry, force=True)
@@ -202,7 +202,7 @@ def test_refresh_reaches_the_shared_credentials_lock(
     monkeypatch.setattr(CredentialPool, "_claude_code_credentials_lock", _tracking_lock)
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _rotating_refresh)
 
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     entry = next(e for e in pool._entries if e.source == "claude_code")
     pool._refresh_entry(entry, force=True)
 
@@ -215,7 +215,7 @@ def test_empty_oauth_entry_is_never_leased(hermes_home, claude_credentials):
     The pre-existing guard covered ``AUTH_TYPE_API_KEY`` only, so an OAuth row
     that failed to hydrate went straight into the available list.
     """
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     entry = next(e for e in pool._entries if e.source == "claude_code")
     blanked = dc_replace(entry, access_token="", refresh_token="")
     pool._replace_entry(entry, blanked)
@@ -234,7 +234,7 @@ def test_selection_after_refresh_leases_only_hydrated_entries(
     """End-to-end: refresh through selection leaves a usable, non-empty lease."""
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _rotating_refresh)
 
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     available, _pending = pool._available_entries(clear_expired=True, refresh=True)
 
     assert available, "the credential must survive the refresh, not be dropped"
@@ -263,7 +263,7 @@ def test_hermes_pkce_row_still_syncs_from_the_pool_store(monkeypatch):
     )
 
     entry = PooledCredential(
-        provider="anthropic",
+        provider="anthropic-oauth",
         id="anthropic-pkce",
         label="anthropic oauth",
         auth_type=AUTH_TYPE_OAUTH,
@@ -273,7 +273,7 @@ def test_hermes_pkce_row_still_syncs_from_the_pool_store(monkeypatch):
         refresh_token=_STALE_REFRESH,
         expires_at_ms=_EXPIRED_MS,
     )
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
 
     synced = pool._sync_anthropic_entry_from_pool_store(entry)
 

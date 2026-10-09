@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
 
+from agent.anthropic_provider import lane_accepts_token, lane_mismatch_hint
 from agent.credential_pool import (
     AUTH_TYPE_API_KEY, AUTH_TYPE_OAUTH, CUSTOM_POOL_PREFIX, SOURCE_MANUAL,
     SOURCE_MANUAL_DEVICE_CODE, STATUS_EXHAUSTED, STRATEGY_FILL_FIRST, STRATEGY_ROUND_ROBIN,
@@ -27,12 +28,12 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 
 
 # Providers that support OAuth login in addition to API keys.
-_OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "qwen-oauth", "minimax-oauth", "openrouter"}
+_OAUTH_CAPABLE_PROVIDERS = {"anthropic-oauth", "nous", "openai-codex", "xai-oauth", "qwen-oauth", "minimax-oauth", "openrouter"}
 # ...and default to it when ``--type`` is omitted. OpenRouter stays API-key-first: the documented
 # ``hermes auth add openrouter --api-key sk-or-...`` must keep working with no ``--type``.
 _OAUTH_DEFAULT_PROVIDERS = _OAUTH_CAPABLE_PROVIDERS - {"openrouter"}
 # Providers whose sibling CLI login Hermes may borrow (``auth.adopt_external_logins``).
-EXTERNAL_LOGIN_PROVIDERS = {"anthropic", "openai-codex"}
+EXTERNAL_LOGIN_PROVIDERS = {"anthropic-oauth", "openai-codex"}
 
 
 def _get_custom_provider_entries() -> list[dict]:
@@ -243,7 +244,7 @@ def _codex_pool_source(creds: dict) -> str:
 
 
 _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
-    "anthropic": _OAuthAddSpec(
+    "anthropic-oauth": _OAuthAddSpec(
         login=_anthropic_oauth_login,
         token=lambda creds: creds["access_token"],
         source=f"{SOURCE_MANUAL}:hermes_pkce",
@@ -362,6 +363,9 @@ def _add_api_key_credential(args, provider: str, pool) -> PooledCredential:
              or masked_secret_prompt("Paste your API key: ").strip())
     if not token:
         raise SystemExit("No API key provided.")
+    if not lane_accepts_token(provider, token):
+        # A pasted subscription token must never bill the API-key lane (or the reverse).
+        raise SystemExit(lane_mismatch_hint(provider))
     default_label = f"api-key-{len(pool.entries()) + 1}"
     label = (getattr(args, "label", None) or "").strip()
     if not label and sys.stdin.isatty():
@@ -418,6 +422,9 @@ def _add_credential(args, provider: str, pool, requested_type: str) -> PooledCre
         return _add_nous_oauth_credential(args, provider)
 
     spec = _OAUTH_ADD_SPECS.get(provider)
+    if spec is None and provider == "anthropic":
+        raise SystemExit("Claude Pro/Max subscription logins belong to the 'anthropic-oauth' provider: "
+                         "run `hermes auth add anthropic-oauth`.")
     if spec is None:
         raise SystemExit(f"`hermes auth add {provider}` is not implemented for auth type {requested_type} yet.")
 

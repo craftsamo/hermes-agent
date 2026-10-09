@@ -204,12 +204,13 @@ class TestResolveAnthropicToken:
     def _assert_not_called(*_args, **_kwargs):
         raise AssertionError("should not be called when API key is present")
 
-    def test_prefers_oauth_token_over_api_key(self, monkeypatch, tmp_path):
+    def test_each_lane_resolves_only_its_own_credential(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-mykey")
         monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-mytoken")
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_credentials.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-mytoken"
+        assert resolve_anthropic_token() == "sk-ant-api03-mykey"
+        assert resolve_anthropic_token(provider="anthropic-oauth") == "sk-ant-oat01-mytoken"
 
     def test_does_not_resolve_primary_api_key_as_native_anthropic_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -271,7 +272,7 @@ class TestResolveAnthropicToken:
             }
         }))
         monkeypatch.setattr("agent.anthropic_credentials.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "cc-auto-token"
+        assert resolve_anthropic_token(provider="anthropic-oauth") == "cc-auto-token"
 
     def test_falls_back_to_anthropic_credential_pool_oauth(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -283,15 +284,17 @@ class TestResolveAnthropicToken:
         # returns nothing, mirroring a Hermes-PKCE-only setup.
         monkeypatch.setattr("agent.anthropic_credentials.read_claude_code_credentials", lambda: None)
 
-        pool_entry = PooledCredential.from_dict("anthropic", {
-            "auth_type": "oauth", "access_token": "pool-oauth-token",
+        pool_entry = PooledCredential.from_dict("anthropic-oauth", {
+            "auth_type": "oauth", "access_token": "sk-ant-oat01-pool-oauth-token",
         })
         pool = SimpleNamespace(
             _available_entries=lambda **_kwargs: ([pool_entry], []),
         )
         monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
 
-        assert resolve_anthropic_token() == "pool-oauth-token"
+        assert resolve_anthropic_token(provider="anthropic-oauth") == "sk-ant-oat01-pool-oauth-token"
+        # The API-key lane never resolves the subscription grant.
+        assert resolve_anthropic_token() is None
 
     def test_api_key_wins_over_anthropic_credential_pool_oauth(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant...ykey")
@@ -330,10 +333,8 @@ class TestResolveAnthropicToken:
         assert resolve_anthropic_token() == "sk-ant...ykey"
 
     def test_pool_api_key_only_entry_is_not_returned_as_token(self, monkeypatch, tmp_path):
-        """resolve_anthropic_token() returns an OAuth bearer token; a pool entry
-        whose auth_type is api_key (not oauth) must NOT be returned from the pool
-        path — those are consumed via the aux client's _pool_runtime_api_key
-        lane, a different resolution concern."""
+        """An api-key pool row belongs to the ``anthropic`` lane only: the
+        ``anthropic-oauth`` resolver must not return it as a bearer token."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -341,16 +342,15 @@ class TestResolveAnthropicToken:
         monkeypatch.setattr("agent.anthropic_credentials.read_claude_code_credentials", lambda: None)
 
         api_key_entry = PooledCredential.from_dict("anthropic", {
-            "auth_type": "api_key", "access_token": "sk-pool-apikey",
+            "auth_type": "api_key", "access_token": "sk-ant-api03-pool-apikey",
         })
         pool = SimpleNamespace(
             _available_entries=lambda **_kwargs: ([api_key_entry], []),
         )
         monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
 
-        # No OAuth entry and no other source → None (the api_key entry is ignored here).
-        assert resolve_anthropic_token() is None
-
+        assert resolve_anthropic_token(provider="anthropic-oauth") is None
+        assert resolve_anthropic_token() == "sk-ant-api03-pool-apikey"
 
     def test_pool_resolution_is_read_only(self, monkeypatch, tmp_path):
         """The resolver must enumerate the pool read-only — clear_expired and
@@ -363,8 +363,8 @@ class TestResolveAnthropicToken:
         monkeypatch.setattr("agent.anthropic_credentials.read_claude_code_credentials", lambda: None)
 
         captured = {}
-        pool_entry = PooledCredential.from_dict("anthropic", {
-            "auth_type": "oauth", "access_token": "pool-oauth-token",
+        pool_entry = PooledCredential.from_dict("anthropic-oauth", {
+            "auth_type": "oauth", "access_token": "sk-ant-oat01-pool-oauth-token",
         })
 
         def _available_entries(**kwargs):
@@ -374,7 +374,7 @@ class TestResolveAnthropicToken:
         pool = SimpleNamespace(_available_entries=_available_entries)
         monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
 
-        assert resolve_anthropic_token() == "pool-oauth-token"
+        assert resolve_anthropic_token(provider="anthropic-oauth") == "sk-ant-oat01-pool-oauth-token"
         assert captured == {"clear_expired": False, "refresh": False}
 
     def test_prefers_refreshable_claude_code_credentials_over_static_anthropic_token(self, monkeypatch, tmp_path):
@@ -392,7 +392,7 @@ class TestResolveAnthropicToken:
         }))
         monkeypatch.setattr("agent.anthropic_credentials.Path.home", lambda: tmp_path)
 
-        assert resolve_anthropic_token() == "cc-auto-token"
+        assert resolve_anthropic_token(provider="anthropic-oauth") == "cc-auto-token"
 
 
 class TestRefreshOauthToken:
@@ -520,7 +520,7 @@ class TestResolveWithRefresh:
 
         # Mock refresh to succeed
         with patch("agent.anthropic_credentials._refresh_oauth_token", return_value="refreshed-token"):
-            result = resolve_anthropic_token()
+            result = resolve_anthropic_token(provider="anthropic-oauth")
 
         assert result == "refreshed-token"
 
@@ -541,7 +541,7 @@ class TestResolveWithRefresh:
         monkeypatch.setattr("agent.anthropic_credentials.Path.home", lambda: tmp_path)
 
         with patch("agent.anthropic_credentials._refresh_oauth_token", return_value="refreshed-token"):
-            result = resolve_anthropic_token()
+            result = resolve_anthropic_token(provider="anthropic-oauth")
 
         assert result == "refreshed-token"
 

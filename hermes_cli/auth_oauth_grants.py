@@ -23,7 +23,7 @@ logger = logging.getLogger("hermes_cli.auth")
 # ``refresh_token_reused``.
 # Profiles must never receive a copy: ONE grant lives at the global root and named profiles read
 # it through the ``read_credential_pool`` root fallback.
-SINGLE_USE_REFRESH_POOL_PROVIDERS = frozenset({"anthropic", "openai-codex", "xai-oauth", "nous"})
+SINGLE_USE_REFRESH_POOL_PROVIDERS = frozenset({"anthropic-oauth", "openai-codex", "xai-oauth", "nous"})
 
 # Singleton credential files holding the same single-use grants outside ``auth.json``. Copying one
 # into a profile re-seeds a forked pool row on the profile's next ``load_pool()``.
@@ -582,7 +582,7 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
             return None
     profile_path = _auth_file_path()
     profile_home = profile_path.parent
-    is_anthropic = provider_id == "anthropic"
+    is_anthropic = provider_id == "anthropic-oauth"
     profile_singleton = profile_home / ".anthropic_oauth.json" if is_anthropic else None
     root_singleton = root_path.parent / ".anthropic_oauth.json" if is_anthropic else None
 

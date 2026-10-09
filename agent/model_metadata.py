@@ -2274,7 +2274,7 @@ def get_model_context_length(
         resolve = _resolve_custom_codex_route_context_length if codex_route else _resolve_custom_endpoint_context_length
         return resolve(model, base_url, api_key, provider)
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
-    if provider == "anthropic" or (base_url and base_url_hostname(base_url) == "api.anthropic.com"):
+    if provider in ("anthropic", "anthropic-oauth") or (base_url and base_url_hostname(base_url) == "api.anthropic.com"):
         ctx = _query_anthropic_context_length(model, base_url or "https://api.anthropic.com", api_key)
         if ctx:
             return ctx

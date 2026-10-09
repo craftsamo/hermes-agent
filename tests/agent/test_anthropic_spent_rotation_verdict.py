@@ -2,12 +2,12 @@
 
 ``_refresh_oauth_token()`` already refuses to return an access token whose
 refresh half was lost to a failed write.  That verdict was local: the caller
-above it (``resolve_anthropic_token()``) simply continued to the next source,
+above it (``resolve_anthropic_token(provider="anthropic-oauth")``) simply continued to the next source,
 and source 5 (``_resolve_anthropic_pool_token``) enumerates read-only
 (``clear_expired=False, refresh=False``) over a pool that ``load_pool()`` has
 just re-seeded from the *unchanged* singleton file.  So the very pair whose
 refresh token the POST had already spent came back as a healthy token, and
-``_refresh_provider_credentials("anthropic")`` reported the refresh as a
+``_refresh_provider_credentials("anthropic-oauth")`` reported the refresh as a
 success and evicted its cached clients.
 
 That is the same silent-transition failure the fail-closed path exists to
@@ -15,9 +15,9 @@ prevent, one layer up: no ``invalid_grant`` is raised until the *next* refresh,
 by which point the provenance of the failure is gone.
 
 These tests take the full resolver path, not just the writer: successful POST +
-failed commit must make ``resolve_anthropic_token()`` return ``None`` (or a
+failed commit must make ``resolve_anthropic_token(provider="anthropic-oauth")`` return ``None`` (or a
 genuinely independent credential), must make
-``_refresh_provider_credentials("anthropic")`` return ``False`` when the spent
+``_refresh_provider_credentials("anthropic-oauth")`` return ``False`` when the spent
 family is the only credential, and must keep the spent fingerprint out of every
 lease.
 
@@ -121,7 +121,7 @@ def _add_independent_pool_entry(home):
     path = home / "auth.json"
     store = json.loads(path.read_text(encoding="utf-8"))
     pool = store.setdefault("credential_pool", {})
-    pool.setdefault("anthropic", []).append(
+    pool.setdefault("anthropic-oauth", []).append(
         {
             "id": "anthropic-independent",
             "label": "second subscription",
@@ -179,7 +179,7 @@ def test_resolve_returns_none_when_the_rotation_could_not_commit(
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _rotating_refresh)
     _break_durable_write(monkeypatch)
 
-    assert AA.resolve_anthropic_token() is None, (
+    assert AA.resolve_anthropic_token(provider="anthropic-oauth") is None, (
         "a consumed-but-uncommitted rotation must not resolve to a usable token"
     )
 
@@ -198,7 +198,7 @@ def test_auxiliary_refresh_reports_failure_for_a_lost_commit(
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _rotating_refresh)
     _break_durable_write(monkeypatch)
 
-    assert _refresh_provider_credentials("anthropic", failed_api_key=_STALE_ACCESS) is False
+    assert _refresh_provider_credentials("anthropic-oauth", failed_api_key=_STALE_ACCESS) is False
 
 
 def test_independent_pool_credential_stays_eligible(
@@ -209,7 +209,7 @@ def test_independent_pool_credential_stays_eligible(
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _rotating_refresh)
     _break_durable_write(monkeypatch)
 
-    resolved = AA.resolve_anthropic_token()
+    resolved = AA.resolve_anthropic_token(provider="anthropic-oauth")
 
     assert resolved == _INDEPENDENT_ACCESS, (
         "an unrelated credential must still be selectable after the quarantine"
@@ -222,7 +222,7 @@ def test_successful_commit_leaves_the_credential_usable(
     """Control: nothing is quarantined when the commit actually lands."""
     monkeypatch.setattr(AA, "refresh_anthropic_oauth_pure", _rotating_refresh)
 
-    assert AA.resolve_anthropic_token() == _ROTATED_ACCESS
+    assert AA.resolve_anthropic_token(provider="anthropic-oauth") == _ROTATED_ACCESS
     assert AA._SPENT_ROTATION_FINGERPRINTS == {}
 
 

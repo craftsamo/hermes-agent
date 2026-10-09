@@ -23,7 +23,7 @@ from hermes_cli.auth_commands import auth_list_command
 
 
 def _write_config(hermes_home, adopt):
-    body = "model:\n  provider: anthropic\n  model: claude-sonnet-4-5\n"
+    body = "model:\n  provider: anthropic-oauth\n  model: claude-sonnet-4-5\n"
     if adopt is not None:
         body += f"auth:\n  adopt_external_logins: {'true' if adopt else 'false'}\n# arm {adopt}\n"
     (hermes_home / "config.yaml").write_text(body)
@@ -59,14 +59,14 @@ def test_opt_out_never_reads_or_refreshes_claude_code_login(tmp_path, monkeypatc
 
     # Arm A (default): today's behaviour — the borrowed login is seeded into the pool.
     _write_config(hermes_home, adopt=None)
-    assert [e.source for e in load_pool("anthropic").entries()] == ["claude_code"]
+    assert [e.source for e in load_pool("anthropic-oauth").entries()] == ["claude_code"]
 
     # Arm B (opt-out): no read, no refresh POST, the persisted row is dropped, the status line explains why.
     _write_config(hermes_home, adopt=False)
-    assert ac.resolve_anthropic_token() is None
+    assert ac.resolve_anthropic_token(provider="anthropic-oauth") is None
     assert posts == []
     assert cred_file.read_bytes() == original_bytes
-    assert [e.source for e in load_pool("anthropic").entries()] == []
+    assert [e.source for e in load_pool("anthropic-oauth").entries()] == []
     out = io.StringIO()
     with redirect_stdout(out):
         auth_list_command(SimpleNamespace(provider=None))
@@ -74,7 +74,7 @@ def test_opt_out_never_reads_or_refreshes_claude_code_login(tmp_path, monkeypatc
 
     # Arm A again: flipping back adopts (and refreshes) exactly as before.
     _write_config(hermes_home, adopt=True)
-    assert ac.resolve_anthropic_token() == "sk-ant-oat01-fresh"
+    assert ac.resolve_anthropic_token(provider="anthropic-oauth") == "sk-ant-oat01-fresh"
     assert len(posts) == 1
     out = io.StringIO()
     with redirect_stdout(out):

@@ -250,10 +250,10 @@ class TestAnthropicEnvAuthTypeClassification:
     OAuth refresh path.
     """
 
-    def _seed(self, env_var, token):
+    def _seed(self, env_var, token, provider="anthropic"):
         from agent.credential_pool import _seed_from_env
         entries = []
-        _seed_from_env("anthropic", entries)
+        _seed_from_env(provider, entries)
         # The seeded entry whose label is the env var we wrote.
         matching = [e for e in entries if getattr(e, "label", None) == env_var]
         assert matching, f"expected a seeded entry for {env_var}, got {entries}"
@@ -263,7 +263,7 @@ class TestAnthropicEnvAuthTypeClassification:
         """sk-ant-oat- token from CLAUDE_CODE_OAUTH_TOKEN → AUTH_TYPE_OAUTH."""
         from agent.credential_pool import AUTH_TYPE_OAUTH
         _write_env_file(isolated_hermes_home, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-fake-12345")
-        entry = self._seed("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-fake-12345")
+        entry = self._seed("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-fake-12345", "anthropic-oauth")
         assert entry.auth_type == AUTH_TYPE_OAUTH
 
     def test_admin_key_classified_as_api_key(self, isolated_hermes_home):

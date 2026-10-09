@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
+from agent.anthropic_provider import is_anthropic_provider
 from agent.context_compressor import ContextCompressor
 from agent.agent_runtime_helpers import _ra
 from agent.iteration_budget import IterationBudget, normalize_budget_warning_ratio
@@ -371,7 +372,7 @@ _EXPLICIT_API_MODES = {
 }
 
 
-def _resolve_api_mode(agent, api_mode, provider_name, base_url):
+def _resolve_api_mode(agent, api_mode, provider_name, base_url, api_key=None):
     """Set ``agent.api_mode`` (and provider rewrites) — ordered ladder, first match wins."""
     from hermes_cli.providers import is_actual_route
     from agent.transports import registered_api_modes
@@ -390,9 +391,12 @@ def _resolve_api_mode(agent, api_mode, provider_name, base_url):
     elif provider_name is None and host == "api.x.ai":
         agent.api_mode = "codex_responses"
         agent.provider = "xai"
-    elif agent.provider == "anthropic" or (provider_name is None and host == "api.anthropic.com"):
+    elif is_anthropic_provider(agent.provider) or (provider_name is None and host == "api.anthropic.com"):
         agent.api_mode = "anthropic_messages"
-        agent.provider = "anthropic"
+        if not is_anthropic_provider(agent.provider):
+            # An unlabelled native route takes the lane its key names, so a 401 refresh stays on it.
+            from agent.anthropic_credentials import _is_oauth_token
+            agent.provider = "anthropic-oauth" if isinstance(api_key, str) and _is_oauth_token(api_key) else "anthropic"
     elif url.rstrip("/").endswith("/anthropic"):
         # Third-party Anthropic-compatible endpoints (MiniMax, DashScope) end in /anthropic.
         agent.api_mode = "anthropic_messages"
@@ -742,8 +746,10 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # ANTHROPIC_TOKEN fallback only for native Anthropic — other anthropic_messages providers
     # must use their own key or Anthropic credentials leak to third-party endpoints.
     # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
-    _is_native_anthropic = agent.provider == "anthropic"
-    effective_key = api_key or (resolve_anthropic_token(model=getattr(agent, "model", None)) if _is_native_anthropic else None) or ""
+    _is_native_anthropic = is_anthropic_provider(agent.provider)
+    effective_key = api_key or (
+        resolve_anthropic_token(model=getattr(agent, "model", None), provider=agent.provider)
+        if _is_native_anthropic else None) or ""
 
     # MiniMax OAuth tokens live ~15 min and the SDK freezes api_key at construction, so use a
     # callable provider: build_anthropic_client mints a fresh bearer per request (re-reading
@@ -1166,7 +1172,7 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         prompt_preview = agent.ephemeral_system_prompt[:60] + "..." if len(agent.ephemeral_system_prompt) > 60 else agent.ephemeral_system_prompt
         print(f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)")
     if agent._use_prompt_caching:
-        if agent._use_native_cache_layout and agent.provider == "anthropic":
+        if agent._use_native_cache_layout and is_anthropic_provider(agent.provider):
             source = "native Anthropic"
         elif agent._use_native_cache_layout:
             source = "Anthropic-compatible endpoint"
@@ -2448,7 +2454,7 @@ def init_agent(
     agent._credential_pool = credential_pool
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    _resolve_api_mode(agent, api_mode, provider_name, base_url)
+    _resolve_api_mode(agent, api_mode, provider_name, base_url, api_key)
     _finalize_routing(agent, api_mode, credential_pool)
 
     # Platform callbacks are stored under their parameter names verbatim.

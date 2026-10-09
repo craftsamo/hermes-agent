@@ -876,8 +876,8 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
                     pass
         except Exception as exc:
             logger.debug("Credential pool check failed for %s: %s", hermes_slug, exc)
-    if not has_creds and hermes_slug == "anthropic":
-        # The pool gates anthropic behind is_provider_explicitly_configured() (aux tasks must not
+    if not has_creds and hermes_slug == "anthropic-oauth":
+        # The pool gates anthropic-oauth behind is_provider_explicitly_configured() (aux tasks must not
         # consume Claude Code tokens); the picker is discovery-oriented, so read the files directly.
         try:
             from agent.anthropic_credentials import read_claude_code_credentials, read_hermes_oauth_credentials

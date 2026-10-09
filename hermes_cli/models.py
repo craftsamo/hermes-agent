@@ -1175,7 +1175,7 @@ def _fast_mode_route_supported(
     from agent.model_metadata import is_grok_46_family
 
     if _is_anthropic_fast_model(model_id):
-        allowed = {"anthropic": "api.anthropic.com"}
+        allowed = {"anthropic": "api.anthropic.com", "anthropic-oauth": "api.anthropic.com"}
     elif is_grok_46_family(str(model_id or "")):
         allowed = {"xai": "api.x.ai"}
     else:
@@ -1427,10 +1427,10 @@ def _api_key_provider_live(normalized: str, force_refresh: bool) -> Optional[lis
 def _anthropic_catalog(normalized: str, force_refresh: bool) -> list[str]:
     model_cfg = _get_model_config_dict()
     cfg_base_url = cfg_api_key = ""
-    if normalize_provider(str(model_cfg.get("provider", "") or "")) == "anthropic":
+    if normalize_provider(str(model_cfg.get("provider", "") or "")) == normalized:
         cfg_base_url = str(model_cfg.get("base_url", "") or "").strip()
         cfg_api_key = str(model_cfg.get("api_key", "") or "").strip()
-    live = _fetch_anthropic_models(base_url=cfg_base_url or None, api_key=cfg_api_key or None)
+    live = _fetch_anthropic_models(base_url=cfg_base_url or None, api_key=cfg_api_key or None, provider=normalized)
     curated = list(_PROVIDER_MODELS.get("anthropic", []))
     if not live:
         return curated
@@ -1535,6 +1535,7 @@ _PROVIDER_CATALOG_FETCHERS: dict[str, Any] = {
     "stepfun": _api_key_provider_live,
     "gmi": _api_key_provider_live,
     "anthropic": _anthropic_catalog,
+    "anthropic-oauth": _anthropic_catalog,
     "ai-gateway": lambda normalized, force_refresh: _fetch_ai_gateway_models() or None,
     # DeepInfra's generic /models mixes chat, image, video, speech and embedding models; the tagged
     # catalog helper is the only safe source for the chat picker, including its empty/failure result.
@@ -1699,7 +1700,7 @@ def _relay_model_catalog(normalized: str, relay: str) -> Optional[list[str]]:
 # "no vendor egress when a relay is configured" invariant, so intercepting them would only
 # override correct, better-merged behaviour. Everything else is vendor-pinned (#121387).
 _RELAY_AWARE_CATALOG_FETCHERS = frozenset(
-    {"anthropic", "custom", "openai", "openai-api", "stepfun", "gmi"}
+    {"anthropic", "anthropic-oauth", "custom", "openai", "openai-api", "stepfun", "gmi"}
 )
 
 
@@ -2101,9 +2102,10 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
 
 
 def _resolve_anthropic_pool_catalog_credentials() -> tuple[str, str]:
-    """Read-only API-key pool credential for model discovery (``resolve_anthropic_token()`` ignores
-    ``api_key`` pool entries — its runtime contract is OAuth-oriented)."""
+    """Read-only API-key pool credential of the ``anthropic`` lane for model discovery
+    (``resolve_anthropic_token()`` reads only the env key; manual pool rows live here)."""
     try:
+        from agent.anthropic_credentials import _is_oauth_token
         from agent.credential_pool import AUTH_TYPE_API_KEY
         from hermes_cli.auth import read_credential_pool
 
@@ -2111,7 +2113,7 @@ def _resolve_anthropic_pool_catalog_credentials() -> tuple[str, str]:
             if not isinstance(entry, dict) or entry.get("auth_type") != AUTH_TYPE_API_KEY:
                 continue
             token = str(entry.get("access_token") or "").strip()
-            if token:
+            if token and not _is_oauth_token(token):
                 return token, str(entry.get("base_url") or entry.get("inference_base_url") or "").strip()
     except Exception:
         pass
@@ -2119,19 +2121,20 @@ def _resolve_anthropic_pool_catalog_credentials() -> tuple[str, str]:
 
 
 def _fetch_anthropic_models(
-    timeout: float = 5.0, *, base_url: Optional[str] = None, api_key: Optional[str] = None
+    timeout: float = 5.0, *, base_url: Optional[str] = None, api_key: Optional[str] = None,
+    provider: str = "anthropic",
 ) -> Optional[list[str]]:
     """Sorted model ids from the Anthropic /v1/models endpoint, or None. Credentials: explicit
-    ``api_key``, else ``resolve_anthropic_token()`` (env / OAuth / Claude Code), else a read-only
-    API-key credential_pool entry."""
+    ``api_key``, else ``resolve_anthropic_token(provider=...)`` (the lane's env key or login), else
+    (API-key lane only) a read-only credential_pool entry."""
     try:
         from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
     except ImportError:
         return None
 
     resolved_base_url = base_url
-    token = (api_key or "").strip() or resolve_anthropic_token()
-    if not token:
+    token = (api_key or "").strip() or resolve_anthropic_token(provider=provider)
+    if not token and provider == "anthropic":
         # A pool credential and its endpoint are one security boundary — never pair the pool key
         # with a caller-provided endpoint.
         token, resolved_base_url = _resolve_anthropic_pool_catalog_credentials()
