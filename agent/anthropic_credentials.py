@@ -70,12 +70,18 @@ def _lane_env(provider: str, *names: str) -> str:
     return next((v for v in map(_first_env, names) if v and lane_accepts_token(provider, v)), "")
 
 
+# The Console API-key families (#133856): they pay per token and go out as ``x-api-key``, so they
+# bill the ``anthropic`` lane and never carry the Claude Code identity. One definition serves both
+# the OAuth shape test and the lane check (``anthropic_provider.lane_accepts_token``).
+CONSOLE_KEY_PREFIXES = ("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")
+
+
 def _is_oauth_token(key: str) -> bool:
     """True for Anthropic OAuth/setup tokens (sk-ant-oat*, eyJ JWTs, cc-); False for the Console
-    API-key families sk-ant-api*, sk-ant-usr*, sk-ant-svc* and sk-ant-admin* (#133856) — they pay
-    per token and authenticate as x-api-key, so the Claude Code identity must not ride along.
-    Unknown sk-ant-* prefixes still classify as OAuth so OAuth prefixes Anthropic ships later keep working."""
-    if not key or key.startswith(("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")):
+    API-key families (``CONSOLE_KEY_PREFIXES``) — they pay per token and authenticate as
+    x-api-key, so the Claude Code identity must not ride along. Unknown sk-ant-* prefixes still
+    classify as OAuth so OAuth prefixes Anthropic ships later keep working."""
+    if not key or key.startswith(CONSOLE_KEY_PREFIXES):
         return False
     return key.startswith(("sk-ant-", "eyJ", "cc-"))
 
