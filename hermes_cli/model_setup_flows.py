@@ -988,85 +988,108 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         drop_api_mode=not is_opencode)
 
 
-def _anthropic_authenticate() -> bool:
-    """Interactive Anthropic auth (OAuth subscription or API key). False = flow must stop."""
-    from hermes_cli.main_provider_setup import _run_anthropic_oauth_flow
+def _anthropic_api_key_authenticate() -> bool:
+    """Prompt for a Console API key for the ``anthropic`` lane. False = flow must stop."""
+    from agent.anthropic_provider import lane_accepts_token
     from hermes_cli.config import save_env_value, save_anthropic_api_key
-    _say("", "  Choose authentication method:", "", "    1. Claude Pro/Max subscription (OAuth login)",
-         "    2. Anthropic API key (pay-per-token)", "    3. Cancel", "")
-    choice = _ask("  Choice [1/2/3]: ", raw=True, cancel_msg="")
-    if choice is None:
+    _say("", "  Get an API key at: https://platform.claude.com/settings/keys", "")
+    api_key = _ask("  API key (sk-ant-api...): ", secret=True, cancel_msg="")
+    if api_key is None:
         return False
-    if choice == "1":
-        return _run_anthropic_oauth_flow(save_env_value)
-    if choice == "2":
-        _say("", "  Get an API key at: https://platform.claude.com/settings/keys", "")
-        api_key = _ask("  API key (sk-ant-...): ", secret=True, cancel_msg="")
-        if api_key is None:
-            return False
-        if not api_key:
-            print("  Cancelled.")
-            return False
-        save_anthropic_api_key(api_key, save_fn=save_env_value)
-        print("  ✓ API key saved.")
-        return True
-    print("  No change.")
-    return False
+    if not api_key:
+        print("  Cancelled.")
+        return False
+    if not lane_accepts_token("anthropic", api_key):
+        print("  That is a Claude Pro/Max subscription token, not a Console API key. "
+              "Choose 'Anthropic (Claude Pro/Max)' to use it.")
+        return False
+    save_anthropic_api_key(api_key, save_fn=save_env_value)
+    print("  ✓ API key saved.")
+    return True
+
+
+def _env_credential_label(provider: str, value: str) -> str:
+    """``" (from Bitwarden)"``-style suffix naming the env var that supplied *value*, or ""."""
+    from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.env_loader import format_secret_source_suffix
+    for var in PROVIDER_REGISTRY[provider].api_key_env_vars:
+        if os.getenv(var, "").strip() == value and (suffix := format_secret_source_suffix(var)):
+            return suffix
+    return ""
+
+
+def _finish_anthropic_model(provider: str, label: str, current_model: str) -> None:
+    from hermes_cli.models import _PROVIDER_MODELS
+    print()
+    selected = _pick_model_or_prompt(
+        _PROVIDER_MODELS.get(provider, []), "Model name (e.g., claude-sonnet-4-20250514): ",
+        current_model=current_model, confirm_provider=provider)
+    # Clear base_url: resolve_runtime_provider() always hardcodes Anthropic's URL, and a
+    # stale value can contaminate other providers on a later switch.
+    _finish_model(selected, provider, f"Default model set to: {selected} (via {label})",
+                  drop_base_url=True, drop_api_mode=True)
 
 
 def _model_flow_anthropic(config, current_model=""):
-    """Flow for Anthropic provider — OAuth subscription, API key, or Claude Code creds."""
-    from hermes_cli.auth import get_anthropic_key
-    from hermes_cli.models import _PROVIDER_MODELS
+    """Flow for the ``anthropic`` provider — a Console API key billed per token."""
+    from agent.anthropic_credentials import resolve_anthropic_token
 
-    # Check ALL credential sources
-    existing_key = get_anthropic_key()
-    cc_available = False
-    with contextlib.suppress(Exception):
-        from agent.anthropic_credentials import read_claude_code_credentials, is_claude_code_token_valid, _is_oauth_token
-        cc_creds = read_claude_code_credentials()
-        if cc_creds and is_claude_code_token_valid(cc_creds):
-            cc_available = True
-
-    # Stale-OAuth guard: an expired OAuth token with no valid cc_creds fallback is treated
-    # as missing so the re-auth path is offered.
-    existing_is_stale_oauth = bool(existing_key and _is_oauth_token(existing_key) and not cc_available)
-    has_creds = (bool(existing_key) and not existing_is_stale_oauth) or cc_available
-    needs_auth = not has_creds
-
-    if has_creds:
-        if existing_key:
-            from hermes_cli.env_loader import format_secret_source_suffix
-            from hermes_cli.auth import PROVIDER_REGISTRY
-
-            # Surface which env var supplied the key so Bitwarden users see "(from Bitwarden)".
-            source_suffix = ""
-            for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars:
-                if os.getenv(var, "").strip() == existing_key:
-                    source_suffix = format_secret_source_suffix(var)
-                    if source_suffix:
-                        break
-            print(f"  Anthropic credentials: {existing_key[:12]}... ✓{source_suffix}")
-        elif cc_available:
-            print("  Claude Code credentials: ✓ (auto-detected)")
+    existing_key = resolve_anthropic_token(provider="anthropic") or ""
+    needs_auth = not existing_key
+    if existing_key:
+        print(f"  Anthropic API key: {existing_key[:12]}... ✓{_env_credential_label('anthropic', existing_key)}")
         print()
-        choice = _prompt_auth_credentials_choice("Anthropic credentials:")
+        choice = _prompt_auth_credentials_choice("Anthropic API key:")
         if choice == "reauth":
             needs_auth = True
         elif choice == "cancel":
             return
         # "use" (default): proceed to model selection with existing creds
-
-    if needs_auth and not _anthropic_authenticate():
+    if needs_auth and not _anthropic_api_key_authenticate():
         return
-    print()
+    _finish_anthropic_model("anthropic", "Anthropic API", current_model)
 
-    selected = _pick_model_or_prompt(
-        _PROVIDER_MODELS.get("anthropic", []), "Model name (e.g., claude-sonnet-4-20250514): ",
-        current_model=current_model, confirm_provider="anthropic")
-    # Clear base_url: resolve_runtime_provider() always hardcodes Anthropic's URL, and a
-    # stale value can contaminate other providers on a later switch.
-    _finish_model(selected, "anthropic", f"Default model set to: {selected} (via Anthropic)", drop_base_url=True, drop_api_mode=True)
+
+def _model_flow_anthropic_oauth(config, current_model=""):
+    """Flow for the ``anthropic-oauth`` provider — a Claude Pro/Max subscription (setup-token,
+    Claude Code credentials, or a Hermes login from ``hermes auth add anthropic-oauth``)."""
+    from hermes_cli.auth import PROVIDER_REGISTRY, read_credential_pool
+    from hermes_cli.config import get_env_value_prefer_dotenv, save_env_value
+    from hermes_cli.main_provider_setup import _run_anthropic_oauth_flow
+
+    existing_token = next((v for v in (get_env_value_prefer_dotenv(var) or ""
+                                       for var in PROVIDER_REGISTRY["anthropic-oauth"].api_key_env_vars) if v), "")
+    cc_available = False
+    with contextlib.suppress(Exception):
+        from agent.anthropic_credentials import read_claude_code_credentials, is_claude_code_token_valid
+        cc_creds = read_claude_code_credentials()
+        cc_available = bool(cc_creds and is_claude_code_token_valid(cc_creds))
+    hermes_login = any(
+        isinstance(entry, dict) and str(entry.get("source") or "").endswith("hermes_pkce")
+        and str(entry.get("access_token") or "").strip()
+        for entry in read_credential_pool("anthropic-oauth"))
+
+    # Stale-token guard: an env token with no valid Claude Code / Hermes login behind it is treated
+    # as missing so the re-auth path is offered.
+    has_creds = cc_available or hermes_login
+    needs_auth = not has_creds
+    if has_creds:
+        if existing_token:
+            print(f"  Claude subscription token: {existing_token[:12]}... ✓"
+                  f"{_env_credential_label('anthropic-oauth', existing_token)}")
+        if cc_available:
+            print("  Claude Code credentials: ✓ (auto-detected)")
+        if hermes_login:
+            print("  Hermes Claude login: ✓ (hermes auth add anthropic-oauth)")
+        print()
+        choice = _prompt_auth_credentials_choice("Claude Pro/Max credentials:")
+        if choice == "reauth":
+            needs_auth = True
+        elif choice == "cancel":
+            return
+    if needs_auth and not _run_anthropic_oauth_flow(save_env_value):
+        return
+    _finish_anthropic_model("anthropic-oauth", "Anthropic (Claude Pro/Max)", current_model)
 
 
 # ── Generic flow for plugin providers without a bespoke `_model_flow_*` ────────────────────────────
