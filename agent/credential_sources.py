@@ -238,16 +238,16 @@ _REGISTRY: List[RemovalStep] = [
         description="Any env-seeded credential (XAI_API_KEY, DEEPSEEK_API_KEY, etc.)",
     ),
     RemovalStep(
-        provider="anthropic", source_id="claude_code",
+        provider="anthropic-oauth", source_id="claude_code",
         remove_fn=_suppress_only(
             "Suppressed claude_code credential — it will not be re-seeded.",
             "Note: Claude Code credentials still live in ~/.claude/.credentials.json",
-            "Run `hermes auth add anthropic` to re-enable if needed.",
+            "Run `hermes auth add anthropic-oauth` to re-enable if needed.",
         ),
         description="~/.claude/.credentials.json",
     ),
     RemovalStep(
-        provider="anthropic", source_id="hermes_pkce",
+        provider="anthropic-oauth", source_id="hermes_pkce",
         remove_fn=_remove_hermes_pkce,
         description="~/.hermes/.anthropic_oauth.json",
     ),

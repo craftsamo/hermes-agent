@@ -46,10 +46,32 @@ class AnthropicProfile(ProviderProfile):
             return None
 
 
+class AnthropicOAuthProfile(AnthropicProfile):
+    """Claude Pro/Max subscription lane — OAuth bearer + Claude Code betas, not x-api-key."""
+
+    def fetch_models(
+        self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
+    ) -> list[str] | None:
+        from hermes_cli.models import _fetch_anthropic_models
+
+        return _fetch_anthropic_models(timeout, base_url=base_url, api_key=api_key, provider=self.name)
+
+
 anthropic = AnthropicProfile(
-    name="anthropic", aliases=("claude", "claude-oauth", "claude-code"), api_mode="anthropic_messages",
-    env_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+    name="anthropic", aliases=("claude",), api_mode="anthropic_messages",
+    env_vars=("ANTHROPIC_API_KEY",),
     base_url="https://api.anthropic.com", auth_type="api_key", default_aux_model="claude-haiku-4-5-20251001",
 )
 
+# The registry row (hermes_cli/auth.py, built-in so this profile never re-registers it) keeps
+# auth_type="api_key" because the lane's tokens arrive through the same env-var / pool discovery as
+# API keys; the profile declares what the credential really is, so generic API-key surfaces (env
+# prompts, the key-only setup flow) never offer a subscription token as a pasteable API key.
+anthropic_oauth = AnthropicOAuthProfile(
+    name="anthropic-oauth", aliases=("claude-oauth", "claude-code"), api_mode="anthropic_messages",
+    env_vars=("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+    base_url="https://api.anthropic.com", auth_type="oauth_external", default_aux_model="claude-haiku-4-5-20251001",
+)
+
 register_provider(anthropic)
+register_provider(anthropic_oauth)

@@ -351,7 +351,7 @@ def test_hermes_pkce_refresh_writes_back_to_singleton(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.anthropic_credentials.read_claude_code_credentials", lambda: None)
 
     entry = PooledCredential(
-        provider="anthropic",
+        provider="anthropic-oauth",
         id="pool-entry",
         label="cred",
         auth_type=AUTH_TYPE_OAUTH,
@@ -360,7 +360,7 @@ def test_hermes_pkce_refresh_writes_back_to_singleton(tmp_path, monkeypatch):
         access_token="sk-ant-oat-rt0",
         refresh_token="rt0",
     )
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
     updated = pool._refresh_entry(entry, force=True)
     assert updated is not None
     assert updated.refresh_token == "rt1"
@@ -372,7 +372,7 @@ def test_hermes_pkce_refresh_writes_back_to_singleton(tmp_path, monkeypatch):
         "revert the pool entry to the pre-refresh (spent) token on next load"
     )
 
-    reloaded = load_pool("anthropic")
+    reloaded = load_pool("anthropic-oauth")
     reloaded_entries = [e for e in reloaded.entries() if e.source.endswith("hermes_pkce")]
     assert reloaded_entries, "hermes_pkce entry should still be present after reload"
     assert reloaded_entries[0].refresh_token == "rt1", (
@@ -402,7 +402,7 @@ def test_manual_hermes_pkce_refresh_does_not_create_duplicate_singleton(
     _write_store(hermes_home / "auth.json", {"version": 1, "providers": {}})
 
     entry = PooledCredential(
-        provider="anthropic",
+        provider="anthropic-oauth",
         id="manual-entry",
         label="cred",
         auth_type=AUTH_TYPE_OAUTH,
@@ -412,7 +412,7 @@ def test_manual_hermes_pkce_refresh_does_not_create_duplicate_singleton(
         refresh_token="manual-rt-0",
         expires_at_ms=0,
     )
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
     refreshed = pool._refresh_entry(entry, force=True)
 
     assert refreshed is not None
@@ -423,7 +423,7 @@ def test_manual_hermes_pkce_refresh_does_not_create_duplicate_singleton(
         "create a second hermes_pkce singleton source"
     )
 
-    reloaded = load_pool("anthropic")
+    reloaded = load_pool("anthropic-oauth")
     matching = [e for e in reloaded.entries() if e.id == "manual-entry"]
     assert len(matching) == 1
     assert matching[0].source == "manual:hermes_pkce"

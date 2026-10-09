@@ -541,10 +541,10 @@ def _billing_or_entitlement_message(
     # Anthropic Pro/Max OAuth surfaces "extra usage" exhaustion as a hard 400 — "add credits"
     # does not apply. ``unverified`` (#82154): the same 400 is returned for a server-side
     # content-filter rejection, so hedge and name the other cause.
-    if (provider or "").strip().lower() == "anthropic":
+    if (provider or "").strip().lower() == "anthropic-oauth":
         switch = (
-            "You can also switch to an Anthropic API key or another provider with "
-            "/model <model> --provider <provider>."
+            "You can also bill an Anthropic API key instead with /model <model> --provider anthropic, "
+            "or switch to another provider with /model <model> --provider <provider>."
         )
         if unverified:
             return "\n".join([
@@ -559,7 +559,7 @@ def _billing_or_entitlement_message(
                 "at https://claude.ai/settings/usage",
                 switch,
                 # The exhaustion latch replays the stored error without a request.
-                "Retry with a fresh credential state: `hermes auth reset anthropic`. Until that "
+                "Retry with a fresh credential state: `hermes auth reset anthropic-oauth`. Until that "
                 "cooldown clears, this error can be replayed from cache without contacting the API.",
             ])
         return "\n".join([

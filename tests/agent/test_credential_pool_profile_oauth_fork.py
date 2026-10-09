@@ -40,7 +40,7 @@ def fleet(tmp_path, monkeypatch):
         "version": 1,
         "providers": {},
         "credential_pool": {
-            "anthropic": [{
+            "anthropic-oauth": [{
                 "id": "abc123", "label": "team-grant", "auth_type": "oauth",
                 "priority": 0, "source": "manual:hermes_pkce",
                 "access_token": "sk-ant-oat01-AT0", "refresh_token": "sk-ant-ort-RT0",
@@ -107,7 +107,7 @@ def fleet(tmp_path, monkeypatch):
         p = home / "auth.json"
         if not p.exists():
             return None
-        return (json.loads(p.read_text()).get("credential_pool") or {}).get("anthropic")
+        return (json.loads(p.read_text()).get("credential_pool") or {}).get("anthropic-oauth")
 
     return {"root": root, "server": server, "use": use, "rows": pool_rows}
 
@@ -126,7 +126,7 @@ def test_clone_all_strips_oauth_grant_but_keeps_api_keys(fleet):
     )
     pdir = _profile(fleet, "forge", clone_all=True)
     store = json.loads((pdir / "auth.json").read_text())
-    assert "anthropic" not in store["credential_pool"], "OAuth grant was forked into the clone"
+    assert "anthropic-oauth" not in store["credential_pool"], "OAuth grant was forked into the clone"
     assert store["credential_pool"]["openai"][0]["access_token"] == "sk-static-key"
     assert not (pdir / ".anthropic_oauth.json").exists()
 
@@ -140,7 +140,7 @@ def test_strip_helper_drops_device_code_blocks_and_reports(tmp_path):
         "providers": {"openai-codex": {"access_token": "a", "refresh_token": "r"}, "nous": {"agent_key": "k"}},
         "credential_pool": {
             "xai-oauth": [{"id": "x", "auth_type": "oauth", "access_token": "t", "refresh_token": "r"}],
-            "anthropic": [
+            "anthropic-oauth": [
                 {"id": "legacy", "access_token": "sk-ant-oat01-legacy"},  # no auth_type field
                 {"id": "key", "auth_type": "api_key", "access_token": "sk-ant-api03-x"},
             ],
@@ -148,10 +148,10 @@ def test_strip_helper_drops_device_code_blocks_and_reports(tmp_path):
     }))
     summary = strip_cloned_single_use_oauth_grants(pdir)
     store = json.loads((pdir / "auth.json").read_text())
-    assert sorted(summary["pool"]) == ["anthropic", "xai-oauth"]
+    assert sorted(summary["pool"]) == ["anthropic-oauth", "xai-oauth"]
     assert summary["providers"] == ["openai-codex"]
     assert "xai-oauth" not in store["credential_pool"]
-    assert [e["id"] for e in store["credential_pool"]["anthropic"]] == ["key"]
+    assert [e["id"] for e in store["credential_pool"]["anthropic-oauth"]] == ["key"]
     assert "openai-codex" not in store["providers"] and "nous" in store["providers"]
 
 
@@ -282,7 +282,7 @@ def test_first_profile_rotation_does_not_strand_root_or_siblings(fleet):
     atlas = _profile(fleet, "atlas")
 
     fleet["use"](forge)
-    sel = load_pool("anthropic").select()
+    sel = load_pool("anthropic-oauth").select()
     assert sel is not None and sel.access_token == "sk-ant-oat01-AT1"
     # The rotated pair landed in ROOT; forge did not grow a local copy.
     assert fleet["rows"](forge) is None
@@ -290,7 +290,7 @@ def test_first_profile_rotation_does_not_strand_root_or_siblings(fleet):
 
     for home in (atlas, fleet["root"], forge):
         fleet["use"](home)
-        sel = load_pool("anthropic").select()
+        sel = load_pool("anthropic-oauth").select()
         assert sel is not None and sel.access_token == "sk-ant-oat01-AT1", home
     assert [e[0] for e in fleet["server"]["log"]] == ["ROTATE"], fleet["server"]["log"]
     assert fleet["rows"](atlas) is None and fleet["rows"](forge) is None
@@ -303,9 +303,9 @@ def test_agent_init_resolver_sees_sibling_rotation(fleet):
     forge = _profile(fleet, "forge")
     atlas = _profile(fleet, "atlas")
     fleet["use"](forge)
-    load_pool("anthropic").select()
+    load_pool("anthropic-oauth").select()
     fleet["use"](atlas)
-    assert resolve_anthropic_token() == "sk-ant-oat01-AT1"
+    assert resolve_anthropic_token(provider="anthropic-oauth") == "sk-ant-oat01-AT1"
 
 
 def test_borrowing_profile_load_pool_does_not_materialize_local_copy(fleet):
@@ -313,7 +313,7 @@ def test_borrowing_profile_load_pool_does_not_materialize_local_copy(fleet):
 
     fresh = _profile(fleet, "fresh")
     fleet["use"](fresh)
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     assert [e.id for e in pool.entries()] == ["abc123"]
     assert pool._borrowed_root_ids == {"abc123"}
     assert fleet["rows"](fresh) is None
@@ -330,16 +330,16 @@ def test_borrower_prune_never_deletes_root_singleton_grant(fleet, tmp_path):
         "expiresAt": int((time.time() - 3600) * 1000),
     }))
     store = json.loads((root / "auth.json").read_text())
-    store["active_provider"] = "anthropic"
-    del store["credential_pool"]["anthropic"]
+    store["active_provider"] = "anthropic-oauth"
+    del store["credential_pool"]["anthropic-oauth"]
     (root / "auth.json").write_text(json.dumps(store))
     fleet["use"](root)
-    root_rows = [e for e in load_pool("anthropic").entries()]
+    root_rows = [e for e in load_pool("anthropic-oauth").entries()]
     assert [e.source for e in root_rows] == ["hermes_pkce"]
 
     kid = _profile(fleet, "kid")
     fleet["use"](kid)
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     assert [e.source for e in pool.entries()] == ["hermes_pkce"], "borrowed root grant was pruned"
     assert fleet["rows"](root) and fleet["rows"](root)[0]["source"] == "hermes_pkce"
     assert fleet["rows"](kid) is None
@@ -357,9 +357,9 @@ def test_profile_auth_add_owns_only_its_own_rows(fleet):
 
     kid = _profile(fleet, "kid")
     fleet["use"](kid)
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     pool.add_entry(PooledCredential(
-        provider="anthropic", id="own001", label="mine", auth_type=AUTH_TYPE_OAUTH,
+        provider="anthropic-oauth", id="own001", label="mine", auth_type=AUTH_TYPE_OAUTH,
         priority=0, source="manual:hermes_pkce", access_token="sk-ant-oat01-MINE",
         refresh_token="rt-mine",
     ))
@@ -371,7 +371,7 @@ def test_classic_mode_persist_is_unchanged(fleet):
     from agent.credential_pool import load_pool
 
     fleet["use"](fleet["root"])
-    sel = load_pool("anthropic").select()
+    sel = load_pool("anthropic-oauth").select()
     assert sel is not None and sel.access_token == "sk-ant-oat01-AT1"
     assert fleet["rows"](fleet["root"])[0]["refresh_token"] == "sk-ant-ort-RT1"
 
@@ -393,7 +393,7 @@ def _fork(fleet, name, *, rotated_to=None):
     pdir.mkdir(parents=True, exist_ok=True)
     store = json.loads((fleet["root"] / "auth.json").read_text())
     if rotated_to is not None:
-        row = store["credential_pool"]["anthropic"][0]
+        row = store["credential_pool"]["anthropic-oauth"][0]
         row["access_token"] = f"sk-ant-oat01-AT{rotated_to}"
         row["refresh_token"] = f"sk-ant-ort-RT{rotated_to}"
         row["expires_at_ms"] = int((time.time() - 60) * 1000)  # newer, still expired
@@ -418,18 +418,18 @@ def test_heal_consolidates_existing_forks_to_the_live_copy(fleet, caplog):
 
     with caplog.at_level(logging.INFO, logger="hermes_cli.auth"):
         fleet["use"](forge)
-        sel = load_pool("anthropic").select()
+        sel = load_pool("anthropic-oauth").select()
     assert sel is not None and sel.access_token == "sk-ant-oat01-AT2"
     # forge's live pair was adopted by ROOT, then rotated there; forge holds nothing.
     assert fleet["rows"](forge) is None
     assert fleet["rows"](fleet["root"])[0]["refresh_token"] == "sk-ant-ort-RT2"
     assert fleet["rows"](fleet["root"])[0]["id"] == "abc123"
-    healed = [r.message for r in caplog.records if "consolidated forked anthropic OAuth grant" in r.message]
+    healed = [r.message for r in caplog.records if "consolidated forked anthropic-oauth OAuth grant" in r.message]
     assert len(healed) == 1 and "profile forge" in healed[0] and "root updated" in healed[0]
 
     for home in (atlas, fleet["root"], forge):
         fleet["use"](home)
-        sel = load_pool("anthropic").select()
+        sel = load_pool("anthropic-oauth").select()
         assert sel is not None and sel.access_token == "sk-ant-oat01-AT2", home
     assert fleet["rows"](atlas) is None and fleet["rows"](forge) is None
     # Exactly one rotation by us (RT1 -> RT2); the spent RT0 was never replayed.
@@ -448,14 +448,14 @@ def test_heal_is_idempotent_and_logs_once(fleet, caplog):
     kid = _fork(fleet, "kid")
     fleet["use"](kid)
     with caplog.at_level(logging.INFO, logger="hermes_cli.auth"):
-        load_pool("anthropic")
+        load_pool("anthropic-oauth")
         assert fleet["rows"](kid) is None
         notices = consume_oauth_heal_notices()
         assert len(notices) == 1 and "profile kid" in notices[0]
         root_before = (fleet["root"] / "auth.json").read_text()
         # Second and third loads: nothing to do, nothing written, nothing logged.
-        assert heal_forked_single_use_oauth_grants("anthropic") is None
-        load_pool("anthropic")
+        assert heal_forked_single_use_oauth_grants("anthropic-oauth") is None
+        load_pool("anthropic-oauth")
     assert consume_oauth_heal_notices() == []
     assert (fleet["root"] / "auth.json").read_text() == root_before
     assert sum("consolidated forked" in r.message for r in caplog.records) == 1
@@ -468,14 +468,14 @@ def test_heal_never_deletes_the_only_surviving_copy(fleet):
 
     kid = _fork(fleet, "kid", rotated_to=1)
     store = json.loads((fleet["root"] / "auth.json").read_text())
-    del store["credential_pool"]["anthropic"]
+    del store["credential_pool"]["anthropic-oauth"]
     (fleet["root"] / "auth.json").write_text(json.dumps(store))
 
     fleet["use"](kid)
-    sel = load_pool("anthropic").select()
+    sel = load_pool("anthropic-oauth").select()
     assert sel is not None and sel.access_token == "sk-ant-oat01-AT2"
     assert fleet["rows"](kid) and fleet["rows"](kid)[0]["refresh_token"] == "sk-ant-ort-RT2"
-    assert "anthropic" not in (json.loads((fleet["root"] / "auth.json").read_text())["credential_pool"])
+    assert "anthropic-oauth" not in (json.loads((fleet["root"] / "auth.json").read_text())["credential_pool"])
 
 
 @pytest.mark.parametrize("shape", ["pool", "provider"])
@@ -593,15 +593,15 @@ def test_heal_pkce_singleton_shape_commits_live_pair_to_root_singleton(fleet):
 
     root = fleet["root"]
     store = json.loads((root / "auth.json").read_text())
-    store["active_provider"] = "anthropic"
-    del store["credential_pool"]["anthropic"]
+    store["active_provider"] = "anthropic-oauth"
+    del store["credential_pool"]["anthropic-oauth"]
     (root / "auth.json").write_text(json.dumps(store))
     (root / ".anthropic_oauth.json").write_text(json.dumps({
         "accessToken": "sk-ant-oat01-AT0", "refreshToken": "sk-ant-ort-RT0",
         "expiresAt": int((time.time() - 3600) * 1000),
     }))
     fleet["use"](root)
-    load_pool("anthropic")  # seeds root's hermes_pkce row from the singleton
+    load_pool("anthropic-oauth")  # seeds root's hermes_pkce row from the singleton
 
     kid = _profile(fleet, "kid")
     kid.mkdir(parents=True, exist_ok=True)
@@ -612,7 +612,7 @@ def test_heal_pkce_singleton_shape_commits_live_pair_to_root_singleton(fleet):
         "expiresAt": int((time.time() - 60) * 1000),
     }))
     kstore = json.loads((kid / "auth.json").read_text())
-    kstore["credential_pool"]["anthropic"][0].update(
+    kstore["credential_pool"]["anthropic-oauth"][0].update(
         access_token="sk-ant-oat01-AT1", refresh_token="sk-ant-ort-RT1",
         expires_at_ms=int((time.time() - 60) * 1000),
     )
@@ -621,13 +621,13 @@ def test_heal_pkce_singleton_shape_commits_live_pair_to_root_singleton(fleet):
     srv["spent"].add("sk-ant-ort-RT0"); srv["valid"] = {"sk-ant-ort-RT1"}; srv["n"] = 1
 
     fleet["use"](kid)
-    sel = load_pool("anthropic").select()
+    sel = load_pool("anthropic-oauth").select()
     assert sel is not None and sel.access_token == "sk-ant-oat01-AT2"
     assert not (kid / ".anthropic_oauth.json").exists()
     assert fleet["rows"](kid) is None
     assert json.loads((root / ".anthropic_oauth.json").read_text())["refreshToken"] == "sk-ant-ort-RT2"
     fleet["use"](root)
-    sel = load_pool("anthropic").select()
+    sel = load_pool("anthropic-oauth").select()
     assert sel is not None and sel.access_token == "sk-ant-oat01-AT2"
     assert [e[0] for e in srv["log"]] == ["ROTATE"], srv["log"]
 
@@ -636,7 +636,7 @@ def test_heal_is_a_noop_in_classic_mode(fleet):
     from hermes_cli.auth import heal_forked_single_use_oauth_grants
     fleet["use"](fleet["root"])
     before = (fleet["root"] / "auth.json").read_text()
-    assert heal_forked_single_use_oauth_grants("anthropic") is None
+    assert heal_forked_single_use_oauth_grants("anthropic-oauth") is None
     assert (fleet["root"] / "auth.json").read_text() == before
 
 
@@ -740,7 +740,7 @@ def test_heal_leaves_an_aliased_anthropic_singleton_alone(fleet):
     before = (root / ".anthropic_oauth.json").read_text()
 
     fleet["use"](kid)
-    assert heal_forked_single_use_oauth_grants("anthropic") is None
+    assert heal_forked_single_use_oauth_grants("anthropic-oauth") is None
     assert (kid / ".anthropic_oauth.json").is_symlink()
     assert (root / ".anthropic_oauth.json").read_text() == before
 
@@ -790,7 +790,7 @@ def test_persisted_mark_still_re_heals_when_the_root_store_gains_a_grant(fleet):
 
     root = fleet["root"]
     store = json.loads((root / "auth.json").read_text())
-    store["credential_pool"].pop("anthropic")
+    store["credential_pool"].pop("anthropic-oauth")
     (root / "auth.json").write_text(json.dumps(store))
 
     kid = _kid_with_api_key_only(fleet, "kid2")
@@ -802,18 +802,18 @@ def test_persisted_mark_still_re_heals_when_the_root_store_gains_a_grant(fleet):
         "base_url": "https://api.anthropic.com",
     }
     kid_store = json.loads((kid / "auth.json").read_text())
-    kid_store["credential_pool"]["anthropic"] = [dict(fork)]
+    kid_store["credential_pool"]["anthropic-oauth"] = [dict(fork)]
     (kid / "auth.json").write_text(json.dumps(kid_store))
 
     fleet["use"](kid)
-    assert auth_mod.heal_forked_single_use_oauth_grants("anthropic") is None
+    assert auth_mod.heal_forked_single_use_oauth_grants("anthropic-oauth") is None
     assert fleet["rows"](kid), "the only surviving copy must not be stripped"
     marked = grants._oauth_heal_clean_mark_path().read_text()
 
-    store["credential_pool"]["anthropic"] = [dict(fork)]
+    store["credential_pool"]["anthropic-oauth"] = [dict(fork)]
     (root / "auth.json").write_text(json.dumps(store))
     _new_process(auth_mod)
-    assert auth_mod.heal_forked_single_use_oauth_grants("anthropic") is not None, (
+    assert auth_mod.heal_forked_single_use_oauth_grants("anthropic-oauth") is not None, (
         "the persisted mark skipped a heal that had become necessary")
     assert not fleet["rows"](kid), "the fork survived in the profile store"
 
@@ -821,7 +821,7 @@ def test_persisted_mark_still_re_heals_when_the_root_store_gains_a_grant(fleet):
     # stale -- it describes the pre-heal files and can no longer match. The
     # next process re-checks, finds the store clean, and re-stamps.
     _new_process(auth_mod)
-    assert auth_mod.heal_forked_single_use_oauth_grants("anthropic") is None
+    assert auth_mod.heal_forked_single_use_oauth_grants("anthropic-oauth") is None
     assert grants._oauth_heal_clean_mark_path().read_text() != marked
 
 
@@ -833,8 +833,8 @@ def test_stale_terminal_verdict_cannot_kill_peer_token_generation(fleet, borrowe
     from agent.credential_pool import STATUS_DEAD, STATUS_EXHAUSTED, load_pool
 
     fleet["use"](_profile(fleet, "stale-dead") if borrowed else fleet["root"])
-    stale, stale_billing, peer = load_pool("anthropic"), load_pool("anthropic"), load_pool("anthropic")
-    stale_adopter = load_pool("anthropic")
+    stale, stale_billing, peer = load_pool("anthropic-oauth"), load_pool("anthropic-oauth"), load_pool("anthropic-oauth")
+    stale_adopter = load_pool("anthropic-oauth")
     assert peer.try_refresh_matching(credential_id="abc123").refresh_token == "sk-ant-ort-RT1"
     # An ordinary flush whose pair already matches disk must not re-hydrate the live object.
     live = peer._entries[0]
@@ -867,7 +867,7 @@ def test_terminal_verdict_for_current_token_generation_still_persists(fleet):
     from agent.credential_pool import STATUS_DEAD, load_pool
 
     fleet["use"](fleet["root"])
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     pool.mark_exhausted_and_rotate(
         status_code=401, credential_id="abc123",
         error_context={"reason": "invalid_grant", "message": "refresh token already used"},

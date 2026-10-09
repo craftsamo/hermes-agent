@@ -110,7 +110,7 @@ def _process_claude_code_refresh_worker(
         return
 
     entry = _entry(id="pool-entry", refresh_token="stale-rt", source="claude_code")
-    pool = credential_pool_mod.CredentialPool("anthropic", [entry])
+    pool = credential_pool_mod.CredentialPool("anthropic-oauth", [entry])
     try:
         refreshed = pool._refresh_entry(pool.entries()[0], force=True)
         result_queue.put({
@@ -125,7 +125,7 @@ def _process_claude_code_refresh_worker(
 
 def _entry(*, id: str, refresh_token: str, source: str) -> PooledCredential:
     return PooledCredential(
-        provider="anthropic",
+        provider="anthropic-oauth",
         id=id,
         label="anthropic oauth",
         auth_type=AUTH_TYPE_OAUTH,
@@ -199,7 +199,7 @@ def test_high_concurrency_anthropic_refresh_no_lost_updates_no_deadlock(
         id="pool-entry", refresh_token="stale-rt", source="manual:hermes_pkce"
     )
     pools = [
-        CredentialPool("anthropic", [dc_replace(shared_stale_entry)])
+        CredentialPool("anthropic-oauth", [dc_replace(shared_stale_entry)])
         for _ in range(CONCURRENCY)
     ]
 

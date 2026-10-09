@@ -139,7 +139,7 @@ def _break_durable_write(monkeypatch):
 
 def _entry(source: str) -> PooledCredential:
     return PooledCredential(
-        provider="anthropic",
+        provider="anthropic-oauth",
         id="anthropic-1",
         label="anthropic oauth",
         auth_type=AUTH_TYPE_OAUTH,
@@ -254,7 +254,7 @@ def test_pool_claude_code_fails_closed_and_reload_cannot_resurrect(
     _break_durable_write(monkeypatch)
 
     entry = _entry("claude_code")
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
 
     assert pool._refresh_entry(entry, force=True) is None, (
         "an uncommitted rotation must not be returned as a refreshed credential"
@@ -271,7 +271,7 @@ def test_pool_claude_code_fails_closed_and_reload_cannot_resurrect(
     assert _read_claude_pair(claude_credentials) == (_STALE_ACCESS, _STALE_REFRESH)
 
     reloaded = [
-        e for e in load_pool("anthropic").entries() if e.source == "claude_code"
+        e for e in load_pool("anthropic-oauth").entries() if e.source == "claude_code"
     ]
     assert reloaded, "the entry should still exist after reload"
     assert reloaded[0].refresh_token == _STALE_REFRESH
@@ -294,7 +294,7 @@ def test_reauthentication_clears_the_persist_failure_quarantine(
     _break_durable_write(monkeypatch)
 
     entry = _entry("claude_code")
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
     assert pool._refresh_entry(entry, force=True) is None
     assert pool.entries()[0].last_status == STATUS_DEAD
 
@@ -324,7 +324,7 @@ def test_reauthentication_clears_the_persist_failure_quarantine(
     )
 
     reloaded = [
-        e for e in load_pool("anthropic").entries() if e.source == "claude_code"
+        e for e in load_pool("anthropic-oauth").entries() if e.source == "claude_code"
     ]
     assert reloaded
     assert reloaded[0].refresh_token == "sk-ant-ort01-relogin"
@@ -355,7 +355,7 @@ def test_pool_hermes_pkce_fails_closed_and_reload_cannot_resurrect(
     _break_durable_write(monkeypatch)
 
     entry = _entry("hermes_pkce")
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
 
     assert pool._refresh_entry(entry, force=True) is None
 
@@ -368,7 +368,7 @@ def test_pool_hermes_pkce_fails_closed_and_reload_cannot_resurrect(
     assert on_disk["refreshToken"] == _STALE_REFRESH
 
     reloaded = [
-        e for e in load_pool("anthropic").entries() if e.source == "hermes_pkce"
+        e for e in load_pool("anthropic-oauth").entries() if e.source == "hermes_pkce"
     ]
     assert reloaded
     assert reloaded[0].refresh_token == _STALE_REFRESH
@@ -420,7 +420,7 @@ def test_retry_path_fails_closed_when_rotation_cannot_commit(
     _break_durable_write(monkeypatch)
 
     entry = _entry("claude_code")
-    pool = CredentialPool("anthropic", [entry])
+    pool = CredentialPool("anthropic-oauth", [entry])
 
     assert pool._refresh_entry_impl(entry, force=True) is None
     assert posts == [_STALE_REFRESH, "sk-ant-ort01-winner"], (

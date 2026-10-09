@@ -109,6 +109,7 @@ class ModelCapabilities:
 # Hermes provider names → models.dev provider IDs
 PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "openrouter": "openrouter", "novita": "novita-ai", "anthropic": "anthropic",
+    "anthropic-oauth": "anthropic",  # subscription lane of the same Anthropic catalog
     "openai": "openai", "openai-api": "openai", "openai-codex": "openai", "zai": "zai",
     "kimi": "kimi-for-coding", "kimi-coding": "kimi-for-coding",
     "moonshot": "kimi-for-coding", "stepfun": "stepfun",

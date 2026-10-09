@@ -378,11 +378,11 @@ def _print_anthropic_401_diagnostics(agent: Any, key: Any) -> None:
     _plines(
         agent,
         "   Troubleshooting:",
-        f"     • Check ANTHROPIC_TOKEN in {_dhh}/.env for Hermes-managed OAuth/setup tokens",
-        f"     • Check ANTHROPIC_API_KEY in {_dhh}/.env for API keys or legacy token values",
+        f"     • Check ANTHROPIC_TOKEN in {_dhh}/.env for subscription (anthropic-oauth) OAuth/setup tokens",
+        f"     • Check ANTHROPIC_API_KEY in {_dhh}/.env for API-key (anthropic) credentials",
         "     • For API keys: verify at https://platform.claude.com/settings/keys",
-        "     • Hermes login (OAuth): run 'hermes auth add anthropic' to sign in again, then retry",
-        "     • Inspect what Hermes holds: hermes auth list anthropic",
+        "     • Hermes login (OAuth): run 'hermes auth add anthropic-oauth' to sign in again, then retry",
+        "     • Inspect what Hermes holds: hermes auth list anthropic / hermes auth list anthropic-oauth",
         "     • Legacy cleanup: hermes config set ANTHROPIC_TOKEN \"\"",
         "     • Clear stale keys: hermes config set ANTHROPIC_API_KEY \"\"",
     )
