@@ -58,12 +58,26 @@ def _user_data_dir_arg(argv: list[str]) -> Iterator[str]:
             yield argv[i + 1]
 
 
+def _pid_may_hold(pid: int) -> bool:
+    """False once ``pid`` is gone or has exited. A zombie is a killed browser whose parent (the
+    gateway that launched it) has not reaped it yet: ``pid_exists`` still counts it, but it can no
+    longer own anything. Any other psutil error propagates, so an unreadable pid stays "held"."""
+    import psutil
+
+    if not psutil.pid_exists(pid):
+        return False
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
 def snapshot_in_use(dst: str) -> bool:
     """True when a Chromium may still own the profile copy ``dst``, so overlaying its databases is
     unsafe (and a SQLite backup into a held file is exactly what wedged preparation). Conservative:
-    a SingletonLock is stale only when it names THIS host and a pid that no longer exists; then an
-    exact ``--user-data-dir`` scan must also come back clear (socket/cookie symlinks survive
-    crashes, and a lock can be missing while the browser lives). Read-only."""
+    a SingletonLock is stale only when it names THIS host and a pid that no longer exists (or is an
+    unreaped zombie); then an exact ``--user-data-dir`` scan must also come back clear (socket/cookie
+    symlinks survive crashes, and a lock can be missing while the browser lives). Read-only."""
     import psutil
 
     lock = os.path.join(dst, "SingletonLock")
@@ -75,7 +89,7 @@ def snapshot_in_use(dst: str) -> bool:
         try:
             host, _, pid = os.readlink(lock).rpartition("-")
             if (host != socket.gethostname() or not pid.isascii() or not pid.isdecimal()
-                    or int(pid) <= 0 or psutil.pid_exists(int(pid))):
+                    or int(pid) <= 0 or _pid_may_hold(int(pid))):
                 return True
         except (OSError, ValueError, OverflowError, psutil.Error):
             return True  # foreign, malformed, or unreadable ownership is no proof of staleness

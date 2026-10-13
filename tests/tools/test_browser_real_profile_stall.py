@@ -193,6 +193,28 @@ def test_browser_exec_preparation_consumes_operation_budget(monkeypatch, phase):
         run.assert_not_called()
 
 
+@pytest.mark.platforms("posix")  # zombies and SingletonLock host-pid symlinks are POSIX-only
+def test_unreaped_exited_holder_does_not_hold_the_copy(tmp_path):
+    """A browser killed by a relaunch stays a zombie while its parent (the gateway) has not
+    reaped it. ``pid_exists`` still counts it, yet it cannot own the copy: refusing here would
+    block every later launch until the gateway restarts."""
+    import psutil
+
+    copy = tmp_path / "brave"
+    copy.mkdir()
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline, "child never became a zombie"
+            time.sleep(0.05)
+        assert psutil.pid_exists(child.pid)
+        (copy / "SingletonLock").symlink_to(f"{socket.gethostname()}-{child.pid}")
+        assert prep.snapshot_in_use(str(copy)) is False
+    finally:
+        child.wait(timeout=5)
+
+
 @pytest.mark.platforms("posix")  # SingletonLock is a host-pid symlink only on POSIX
 @pytest.mark.parametrize(
     "owner",
