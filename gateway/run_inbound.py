@@ -1220,8 +1220,9 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
         self, event: "MessageEvent", source: SessionSource, _quick_key: str
     ) -> Optional[str]:
         """Replies owned by in-flight work: pending /update prompt, clarify, slash-confirm.
-        Only events that may control the gateway (``allow_gateway_control``) can answer them."""
-        if not event.allow_gateway_control:
+        Only events that may control the gateway (``allow_gateway_control``) can answer them, and
+        never a synthetic (``internal``) event: a process completion is not the user's answer."""
+        if not event.allow_gateway_control or getattr(event, "internal", False):
             return None
         _reply = self._hm_update_prompt_reply(event, _quick_key)
         if _reply is None:

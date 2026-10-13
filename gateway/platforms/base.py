@@ -4177,8 +4177,10 @@ class BasePlatformAdapter(ABC):
         # Otherwise it lands in _pending_messages as a follow-up turn and the answer is
         # discarded.  Same shape as the /approve deadlock fix (PR #4926): agent thread
         # blocked on Event.wait, message must reach the resolver before being a new turn.
-        # See #4926.
-        if not cmd and event.allow_gateway_control:
+        # See #4926. Synthetic events (process completions, wakes) are not answers: routed here
+        # they would resolve the prompt with their own text or cancel it as unrelated prose, so
+        # they take the busy path below and queue behind the turn.
+        if not cmd and event.allow_gateway_control and not event.internal:
             try:
                 from tools import clarify_gateway as _clarify_mod
                 _has_text_clarify = _clarify_mod.get_pending_for_session(
