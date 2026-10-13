@@ -898,20 +898,51 @@ class TestReviewRound3:
         (tmp_path / "Default").mkdir(parents=True)
         assert bc._profile_is_locked(str(tmp_path), "Default") is False
 
-    def test_lock_probe_true_on_permissionerror(self, tmp_path, monkeypatch):
-        import hermes_cli.browser_connect as bc
-        (tmp_path / "Default").mkdir(parents=True)
-        (tmp_path / "Default" / "Cookies").write_bytes(b"db")
+    @staticmethod
+    def _deny_cookie_open(monkeypatch):
         import builtins
         real_open = builtins.open
 
         def deny(path, *a, **k):
             if str(path).endswith("Cookies"):
-                raise PermissionError("locked")
+                raise PermissionError("denied")
             return real_open(path, *a, **k)
 
         monkeypatch.setattr(builtins, "open", deny)
-        assert bc._profile_is_locked(str(tmp_path), "Default") is True
+
+    @staticmethod
+    def _cookie_profile(root):
+        (root / "Default").mkdir(parents=True)
+        (root / "Default" / "Cookies").write_bytes(b"db")
+        return str(root)
+
+    def test_lock_probe_true_on_permissionerror_on_windows(self, tmp_path, monkeypatch):
+        import hermes_cli.browser_connect as bc
+        src = self._cookie_profile(tmp_path)
+        self._deny_cookie_open(monkeypatch)
+        assert bc._profile_is_locked(src, "Default", os_family="win32") is True
+
+    @pytest.mark.platforms("posix")
+    def test_permission_denial_is_not_reported_as_a_lock(self, tmp_path, monkeypatch):
+        """A running browser never denies reads on POSIX, so a PermissionError there (macOS privacy
+        protection of another app's data) must not read as "browser is running": quitting the
+        browser or ``close-profile`` cannot fix it."""
+        import hermes_cli.browser_connect as bc
+        src = self._multi(tmp_path / "real")
+        monkeypatch.setattr(bc, "get_hermes_home", lambda: tmp_path / "hh")
+        self._deny_cookie_open(monkeypatch)
+        dst, err = bc.snapshot_real_profile("brave", src=str(src))
+        assert dst is None
+        assert err and "denied" in err
+        assert not err.startswith(bc._PROFILE_LOCKED_PREFIX)
+
+    def test_access_denied_error_names_full_disk_access_off_windows_only(self, tmp_path, monkeypatch):
+        import hermes_cli.browser_connect as bc
+        src = self._cookie_profile(tmp_path)
+        self._deny_cookie_open(monkeypatch)
+        msg = bc._profile_access_denied_error("brave", src, "Default", os_family="darwin")
+        assert msg and "Full Disk Access" in msg
+        assert bc._profile_access_denied_error("brave", src, "Default", os_family="win32") is None
 
     def test_snapshot_fails_fast_when_locked(self, tmp_path, monkeypatch):
         """snapshot_real_profile always BLOCKS when locked — never kills, never
