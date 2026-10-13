@@ -20,6 +20,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -30,6 +31,7 @@ from agent.proxy_bypass import is_loopback_host
 from hermes_cli import browser_connect_cookie_merge as _cookie_merge
 from hermes_cli import browser_connect_prep as _prep
 from hermes_constants import get_hermes_home
+from hermes_platform.host import facts
 
 logger = logging.getLogger(__name__)
 
@@ -539,20 +541,47 @@ _SNAPSHOT_DONE_MARKER = ".hermes-snapshot-complete"
 _PROFILE_LOCKED_PREFIX = "[profile-locked] "
 
 
-def _profile_is_locked(src: str, source_profile: str) -> bool:
-    """True when the active profile's cookie DB can't be opened (browser running). On Windows a
-    running browser holds Cookies deny-all (PermissionError); this FAST probe fails closed BEFORE
-    the heavy snapshot so a locked profile never hangs the launch. Always False on POSIX."""
+def _cookie_db_denied(src: str, source_profile: str) -> bool:
+    """True when the active profile's cookie DB exists but opening it raises PermissionError."""
     db = _first_present(  # modern Network/ location first
         os.path.join(src, source_profile, rel)
         for rel in (os.path.join("Network", "Cookies"), "Cookies"))
     if not db:
-        return False  # nothing to lock; let the copy path handle "no cookies"
+        return False  # nothing to deny; let the copy path handle "no cookies"
     try:
         with open(db, "rb"):
             return False
-    except OSError as e:  # other OSErrors are transient — don't declare locked; let the copy try
+    except OSError as e:  # other OSErrors are transient — don't declare denied; let the copy try
         return isinstance(e, PermissionError)
+
+
+def _profile_is_locked(src: str, source_profile: str, os_family: str | None = None) -> bool:
+    """True when the active profile's cookie DB can't be opened because the browser is running.
+    On Windows a running browser holds Cookies deny-all (PermissionError); this FAST probe fails
+    closed BEFORE the heavy snapshot so a locked profile never hangs the launch. Always False on
+    POSIX, where a PermissionError is an access denial, not a lock (``_profile_access_denied_error``)."""
+    if (os_family or facts.os_family()) != "win32":
+        return False
+    return _cookie_db_denied(src, source_profile)
+
+
+def _profile_access_denied_error(browser: str, src: str, source_profile: str,
+                                 os_family: str | None = None) -> str | None:
+    """Fail-closed message when the OS refuses this process read access to the profile (macOS
+    privacy protection of another app's data, file permissions), else None. NOT a lock: quitting the
+    browser or ``close-profile`` changes nothing, so this carries no ``_PROFILE_LOCKED_PREFIX``."""
+    os_family = os_family or facts.os_family()
+    if os_family == "win32" or not _cookie_db_denied(src, source_profile):
+        return None
+    if os_family == "darwin":
+        return (f"macOS denied this process read access to {browser}'s profile data, so its login "
+                f"data can't be copied. {browser} is not locked and quitting it will not help. Allow "
+                f"Full Disk Access for {os.path.realpath(sys.executable)} (or the app that launches "
+                "Hermes) in System Settings > Privacy & Security > Full Disk Access, restart that "
+                "process, and retry, or turn browser.use_real_profile off.")
+    return (f"permission denied reading {browser}'s profile data under {src!r}, so its login data "
+            "can't be copied. Fix the profile's ownership or permissions and retry, or turn "
+            "browser.use_real_profile off.")
 
 
 def _browser_setting(key: str):
@@ -821,6 +850,12 @@ def _snapshot_real_profile(browser: str, src: str | None) -> tuple[str | None, s
     if _prep.snapshot_in_use(dst):
         return None, ("the profile copy is still in use by a browser Hermes could not verify; "
                       "refusing to overwrite its login data. Retry after that browser exits.")
+    # An OS-level denial (macOS privacy protection) would otherwise surface as skipped copies or a
+    # misleading "close the browser" message. Unlike a lock it does not clear by itself, so it is
+    # reported rather than served from an older copy.
+    denied = _profile_access_denied_error(browser, src, source_profile)
+    if denied:
+        return None, denied
     marker = os.path.join(dst, _SNAPSHOT_DONE_MARKER)
     # Only a copy that previously COMPLETED counts as populated; a half-written tree is
     # rebuilt — otherwise a torn first copy poisons freshness forever.
