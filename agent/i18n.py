@@ -65,6 +65,10 @@ _LANGUAGE_ALIASES: dict[str, str] = {
 
 # (home, lang) -> merged catalog (packs over overlay over bundled). home -> supported tuple.
 _catalog_cache: dict[tuple[str, str], dict[str, str]] = {}
+# (locale file path) -> parsed bundled catalog. The bundled files are the same for every profile home, so a
+# multiplexed gateway parses each once instead of once per served profile (several concurrent ruamel parses
+# of the largest catalog at startup starved plugin registration past its load deadline).
+_bundled_cache: dict[str, dict[str, str]] = {}
 _supported_cache: dict[str, tuple[str, ...]] = {}
 _catalog_lock = threading.Lock()
 
@@ -128,16 +132,24 @@ def _normalize_lang(value: Any, home: str | None = None) -> str:
 
 
 def _load_bundled(lang: str) -> dict[str, str]:
-    """One bundled locale YAML flattened to dotted keys (empty dict on any failure — never crashes)."""
+    """One bundled locale YAML flattened to dotted keys (empty dict on any failure — never crashes).
+    Shared across profile homes and read-only: callers merging layers copy it first."""
     path = _locales_dir() / f"{lang}.yaml"
+    key = str(path)
+    with _catalog_lock:
+        cached = _bundled_cache.get(key)
+    if cached is not None:
+        return cached
     if not path.is_file():
         logger.debug("i18n catalog missing for %s at %s", lang, path)
         return {}
     try:
-        return i18n_layers.parse_locale_file(path)
+        parsed = i18n_layers.parse_locale_file(path)
     except Exception as exc:
         logger.warning("Failed to load i18n catalog %s: %s", path, exc)
         return {}
+    with _catalog_lock:
+        return _bundled_cache.setdefault(key, parsed)
 
 
 def _flatten_into(node: Any, prefix: str, out: dict[str, str]) -> None:
@@ -153,7 +165,7 @@ def _load_catalog(lang: str, home: str | None = None) -> dict[str, str]:
         cached = _catalog_cache.get(key)
         if cached is not None:
             return cached
-    merged = _load_bundled(lang)
+    merged = dict(_load_bundled(lang))
     merged.update(i18n_layers.overlay_layer(home, lang))
     merged.update(i18n_layers.pack_layer(lang))
     with _catalog_lock:
@@ -200,6 +212,7 @@ def reset_language_cache() -> None:
     _config_language_cached.cache_clear()
     with _catalog_lock:
         _catalog_cache.clear()
+        _bundled_cache.clear()
         _supported_cache.clear()
     i18n_layers.clear_cache()
 
