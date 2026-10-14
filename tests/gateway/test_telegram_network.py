@@ -425,7 +425,8 @@ class TestDiscoverFallbackIps:
         }, system_dns_ips=["149.154.166.110"])
 
         ips = await tnet.discover_fallback_ips()
-        assert ips == ["149.154.166.110", "149.154.167.220"]
+        assert ips[:2] == ["149.154.166.110", "149.154.167.220"]
+        assert len(ips) == len(set(ips))
 
     @pytest.mark.asyncio
     async def test_doh_results_deduplicated(self, monkeypatch):
@@ -435,7 +436,25 @@ class TestDiscoverFallbackIps:
         }, system_dns_ips=["149.154.166.110"])
 
         ips = await tnet.discover_fallback_ips()
-        assert ips == ["149.154.167.220"]
+        assert ips[0] == "149.154.167.220"
+        assert ips.count("149.154.167.220") == 1
+
+    @pytest.mark.asyncio
+    async def test_single_doh_answer_keeps_seed_alternatives(self, monkeypatch):
+        """One DoH answer must not be the only fallback: when that address stops answering, the
+        transport still needs another one to try. DoH answers stay first, seeds follow."""
+        doh_ip = "149.154.167.221"
+        assert doh_ip not in tnet.SEED_FALLBACK_IPS
+        self._patch_doh(monkeypatch, {
+            "https://dns.google": (200, _doh_answer(doh_ip)),
+            "https://cloudflare-dns.com": (200, _doh_answer(doh_ip)),
+        }, system_dns_ips=[doh_ip])
+
+        ips = await tnet.discover_fallback_ips()
+
+        assert ips[0] == doh_ip
+        assert set(tnet.SEED_FALLBACK_IPS) <= set(ips[1:])
+        assert len(ips) == len(set(ips))
 
     @pytest.mark.asyncio
     async def test_all_doh_ips_same_as_system_dns_kept(self, monkeypatch):
@@ -452,7 +471,7 @@ class TestDiscoverFallbackIps:
         }, system_dns_ips=["149.154.166.110"])
 
         ips = await tnet.discover_fallback_ips()
-        assert ips == ["149.154.166.110"]
+        assert ips[0] == "149.154.166.110"
 
     @pytest.mark.asyncio
     async def test_hung_system_dns_does_not_gate_doh_results(self, monkeypatch):
@@ -477,5 +496,5 @@ class TestDiscoverFallbackIps:
         ips = await tnet.discover_fallback_ips()
         elapsed = _time.monotonic() - start
 
-        assert ips == ["149.154.167.220"]
+        assert ips[0] == "149.154.167.220"
         assert elapsed < 1.4, f"discovery gated on hung system DNS ({elapsed:.2f}s)"
