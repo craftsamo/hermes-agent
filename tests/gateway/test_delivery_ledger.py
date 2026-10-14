@@ -506,7 +506,8 @@ class TestGatewayRedeliverySweep:
         await self._runner(second)._redeliver_pending_obligations()
 
         sent = second.send.call_args.kwargs["content"]
-        assert sent == dl.RECOVERED_MARKER + "the final answer"
+        assert sent.startswith(dl.RECOVERED_MARKER + dl.WRITTEN_AT_PREFIX)
+        assert dl.strip_recovery_prefix(sent) == ("the final answer", True)
         assert _row("ob-1")["state"] == "delivered"
 
     def test_boot_claimed_row_is_not_reclaimed_by_runtime_sweep_mid_send(self):
@@ -677,6 +678,73 @@ class TestGatewayRedeliverySweep:
 
         hang.set()
         assert await task == 1
+
+    @pytest.mark.asyncio
+    async def test_recovered_reply_states_when_it_was_written(self):
+        """A late copy names its writing time, so the reader can tell which turn it answers."""
+        from gateway.config import Platform
+
+        written = time.time() - 3 * 60 * 60
+        _record(platform="slack")
+        dl.mark_failed("ob-1", "send_path_degraded")
+        with dl._connect() as conn:
+            conn.execute("UPDATE delivery_obligations SET created_at=? WHERE obligation_id='ob-1'", (written,))
+        adapter = self._adapter()
+
+        await self._runner(adapter)._redeliver_failed_obligations_for_platform(Platform.SLACK)
+
+        sent = adapter.send.call_args.kwargs["content"]
+        label = dl.written_at_label(written)
+        assert label
+        assert sent == dl.RECONNECTED_MARKER + dl.WRITTEN_AT_PREFIX + label + "\n\n" + "the final answer"
+
+    @pytest.mark.asyncio
+    async def test_old_failed_reply_goes_out_marked_after_a_newer_reply_was_delivered(self):
+        """Old reply rejected while degraded -> newer reply delivered -> send path recovers: the old one
+        is sent once, marked and dated, and the delivered newer row is left alone."""
+        from gateway.config import Platform
+
+        _record("ob-old", platform="slack", content="old answer")
+        dl.mark_failed("ob-old", "send_path_degraded")
+        _record("ob-new", platform="slack", content="new answer")
+        dl.mark_delivered("ob-new")
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+
+        assert await runner._redeliver_failed_obligations_for_platform(Platform.SLACK) == 1
+        assert await runner._redeliver_failed_obligations_for_platform(Platform.SLACK) == 0
+
+        assert adapter.send.await_count == 1
+        sent = adapter.send.call_args.kwargs["content"]
+        assert sent.startswith(dl.RECONNECTED_MARKER + dl.WRITTEN_AT_PREFIX)
+        assert dl.strip_recovery_prefix(sent) == ("old answer", True)
+        assert _row("ob-old")["state"] == "delivered"
+        assert _row("ob-new")["state"] == "delivered"
+
+
+class TestRecoveryPrefix:
+    def test_unknown_time_keeps_the_bare_marker(self):
+        assert dl.recovery_prefix(dl.RECOVERED_MARKER, None) == dl.RECOVERED_MARKER
+        assert dl.recovery_prefix(dl.RECOVERED_MARKER, "not a time") == dl.RECOVERED_MARKER
+
+    @pytest.mark.parametrize("marker", ["RECOVERED_MARKER", "RECONNECTED_MARKER", "FLOOD_MARKER"])
+    def test_strip_inverts_every_marker_with_or_without_time(self, marker):
+        mk = getattr(dl, marker)
+        assert dl.strip_recovery_prefix(dl.recovery_prefix(mk, time.time()) + "body") == ("body", True)
+        assert dl.strip_recovery_prefix(mk + "body") == ("body", True)
+
+    def test_label_failure_falls_back_to_the_bare_marker(self, monkeypatch):
+        import hermes_time
+
+        def _boom(*_args, **_kwargs):
+            raise UnicodeEncodeError("utf-8", "x", 0, 1, "surrogates not allowed")
+
+        monkeypatch.setattr(hermes_time, "safe_strftime", _boom)
+        assert dl.recovery_prefix(dl.RECOVERED_MARKER, time.time()) == dl.RECOVERED_MARKER
+
+    def test_unmarked_content_is_untouched(self):
+        text = dl.WRITTEN_AT_PREFIX + "is just text\n\nbody"
+        assert dl.strip_recovery_prefix(text) == (text, False)
 
 
 class TestAttemptsOnlySpentOnRealSends:
