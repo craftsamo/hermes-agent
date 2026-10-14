@@ -4275,6 +4275,36 @@ class BasePlatformAdapter(ABC):
         except Exception:
             logger.debug("delivery ledger update failed", exc_info=True)
 
+    def _schedule_send_path_recovery_redelivery(self) -> None:
+        """Replay this bot's replies rejected with ``send_path_degraded`` once its send path is proven again
+        in place. Installing a replacement adapter sweeps them, but an in-place recovery (Telegram restarting
+        its polling after a network error) installs nothing, so those replies waited for the next restart
+        and landed hours later, after newer ones. Atomic claims keep a concurrent sweep from resending.
+        The runner owns the task: tearing down only this adapter (a profile unserved) must not cancel it
+        mid-batch and strand claimed rows in 'attempting' until the next restart."""
+        runner = getattr(self, "gateway_runner", None)
+        redeliver = getattr(runner, "_redeliver_failed_obligations_for_platform", None)
+        if not callable(redeliver):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _replay() -> None:
+            try:
+                await redeliver(self.platform, profile=getattr(self, "_owner_profile", None))
+            except Exception:
+                logger.debug("[%s] send-path recovery redelivery failed", self.name, exc_info=True)
+
+        task = asyncio.ensure_future(_replay())
+        retain = getattr(runner, "_retain_background_task", None)
+        if callable(retain):
+            retain(task)
+        else:
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
     async def _deliver_media_attachments(
         self, event: MessageEvent, media_files: list, local_files: list, *,
         force_document_attachments: bool, human_delay: float, metadata: dict[str, Any],
