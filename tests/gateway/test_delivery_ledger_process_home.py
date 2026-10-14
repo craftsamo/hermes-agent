@@ -99,5 +99,6 @@ async def test_boot_sweep_redelivers_a_reply_recorded_under_a_served_profile_sco
 
     runner = _runner(adapter)
     assert await runner._redeliver_pending_obligations() == 1
-    assert adapter.sent == [dl.RECOVERED_MARKER + ANSWER]
+    assert len(adapter.sent) == 1 and adapter.sent[0].startswith(dl.RECOVERED_MARKER)
+    assert dl.strip_recovery_prefix(adapter.sent[0]) == (ANSWER, True)
     runner._async_session_store.clear_resume_pending.assert_awaited_once_with(SESSION_KEY)
