@@ -57,6 +57,7 @@ MODELS = {
     "copilot": "gpt-5.5", "gemini": "gemini-3-pro", "kimi-coding": "kimi-k3", "kimi-coding-cn": "kimi-k2.5",
     "stepfun": "step-3", "arcee": "trinity-large", "actual": "actual-1", "minimax": "MiniMax-M3",
     "minimax-oauth": "MiniMax-M3", "minimax-cn": "MiniMax-M3", "anthropic": "claude-opus-5.5",
+    "anthropic-oauth": "claude-opus-5.5",
     "alibaba": "qwen3.5-plus", "alibaba-coding-plan": "qwen3-coder-plus", "xai": "grok-4",
     "ai-gateway": "anthropic/claude-opus-5.5", "opencode-zen": "claude-opus-5.5", "opencode-go": "kimi-k2.5",
     "kilocode": "anthropic/claude-opus-5.5", "xiaomi": "mimo-v2-pro", "tencent-tokenhub": "hunyuan-t1",

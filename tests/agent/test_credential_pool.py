@@ -1210,7 +1210,7 @@ def test_load_pool_oauth_path_still_autodiscovers(tmp_path, monkeypatch):
 
     from agent.credential_pool import load_pool
 
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     sources = {entry.source for entry in pool.entries()}
 
     # Both env OAuth token and autodiscovered Claude Code creds should be there.
@@ -1842,7 +1842,7 @@ def _make_anthropic_claude_code_pool(tmp_path, monkeypatch, *, access_token, ref
     monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     _write_auth_store(tmp_path, {"version": 1, "credential_pool": {}})
-    monkeypatch.setattr("hermes_cli.auth.is_provider_explicitly_configured", lambda pid: pid == "anthropic")
+    monkeypatch.setattr("hermes_cli.auth.is_provider_explicitly_configured", lambda pid: pid == "anthropic-oauth")
     monkeypatch.setattr(
         "agent.anthropic_credentials.read_hermes_oauth_credentials",
         lambda: None,
@@ -1852,7 +1852,7 @@ def _make_anthropic_claude_code_pool(tmp_path, monkeypatch, *, access_token, ref
         lambda: {"accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at_ms},
     )
     from agent.credential_pool import load_pool
-    pool = load_pool("anthropic")
+    pool = load_pool("anthropic-oauth")
     entry = pool.select()
     assert entry is not None
     assert entry.source == "claude_code"

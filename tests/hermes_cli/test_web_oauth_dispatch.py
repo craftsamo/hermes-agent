@@ -523,18 +523,18 @@ def test_anthropic_dashboard_oauth_is_removed_and_external():
     resp = client.get("/api/providers/oauth", headers=HEADERS)
     assert resp.status_code == 200, resp.text
     providers = {p["id"]: p for p in resp.json()["providers"]}
-    assert providers["anthropic"]["flow"] == "external"
+    assert providers["anthropic-oauth"]["flow"] == "external"
 
     before_sessions = set(_web_server_oauth._oauth_sessions)
     start_resp = client.post(
-        "/api/providers/oauth/anthropic/start",
+        "/api/providers/oauth/anthropic-oauth/start",
         headers=HEADERS,
     )
     assert start_resp.status_code == 400, start_resp.text
     assert "claude.ai" not in start_resp.text
 
     submit_resp = client.post(
-        "/api/providers/oauth/anthropic/submit",
+        "/api/providers/oauth/anthropic-oauth/submit",
         headers=HEADERS,
         json={"session_id": "unused", "code": "unused"},
     )
@@ -579,17 +579,17 @@ def test_external_oauth_disconnect_rejected_before_auth_mutation(monkeypatch):
 
 
 def test_env_sourced_oauth_status_is_not_disconnectable(monkeypatch):
-    """An env/.env-backed Anthropic API key is removed from Keys, not OAuth Accounts."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    """An env-backed Anthropic subscription token is not disconnectable from OAuth Accounts."""
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-test-token")
 
     resp = client.get("/api/providers/oauth", headers=HEADERS)
     assert resp.status_code == 200, resp.text
     providers = {p["id"]: p for p in resp.json()["providers"]}
 
-    assert providers["anthropic"]["status"]["source"] == "env_var"
-    assert providers["anthropic"]["disconnectable"] is False
+    assert providers["anthropic-oauth"]["status"]["source"] == "env_var"
+    assert providers["anthropic-oauth"]["disconnectable"] is False
 
-    delete_resp = client.delete("/api/providers/oauth/anthropic", headers=HEADERS)
+    delete_resp = client.delete("/api/providers/oauth/anthropic-oauth", headers=HEADERS)
     assert delete_resp.status_code == 400, delete_resp.text
 
 

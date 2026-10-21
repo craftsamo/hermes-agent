@@ -1,8 +1,10 @@
 """Anthropic credential sources, OAuth flows, and token resolution.
 
-``resolve_anthropic_token()`` order: ``ANTHROPIC_TOKEN`` / ``CLAUDE_CODE_OAUTH_TOKEN``,
-``ANTHROPIC_API_KEY``, Hermes-owned OAuth grants in the ``auth.json`` credential
-pool, then ``~/.claude/.credentials.json`` / macOS Keychain as a borrowed fallback.
+``resolve_anthropic_token(provider=...)`` resolves one billing lane (agent/anthropic_provider.py).
+``anthropic`` (API key): ``ANTHROPIC_API_KEY``, then an API-key row of its credential pool.
+``anthropic-oauth`` (subscription): ``ANTHROPIC_TOKEN`` / ``CLAUDE_CODE_OAUTH_TOKEN``, Hermes-owned
+OAuth grants in the ``auth.json`` credential pool, then ``~/.claude/.credentials.json`` / macOS
+Keychain as a borrowed fallback. A token of the other lane's shape never resolves.
 ``~/.hermes/.anthropic_oauth.json`` (Hermes PKCE) and
 the Claude Code file are *singletons*: ``credential_pool._seed_from_singletons()``
 re-reads them on every ``load_pool()``, so a failed write here is a failed refresh
@@ -28,6 +30,9 @@ from typing import Any, Dict, Optional
 
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, base_url_hostname
+from agent.anthropic_provider import (
+    ANTHROPIC_API_PROVIDER, ANTHROPIC_OAUTH_PROVIDER, is_anthropic_provider, lane_accepts_token,
+)
 from agent.secret_scope import get_secret as _get_secret
 
 logger = logging.getLogger(__name__)
@@ -59,12 +64,24 @@ def _first_env(*names: str) -> str:
     return next((v for v in (_getenv(n).strip() for n in names) if v), "")
 
 
+def _lane_env(provider: str, *names: str) -> str:
+    """First env value among *names* that *provider*'s lane accepts: a misfiled token (a Console key
+    in ANTHROPIC_TOKEN) is skipped so the lane's pool / Claude Code login still resolves."""
+    return next((v for v in map(_first_env, names) if v and lane_accepts_token(provider, v)), "")
+
+
+# The Console API-key families (#133856): they pay per token and go out as ``x-api-key``, so they
+# bill the ``anthropic`` lane and never carry the Claude Code identity. One definition serves both
+# the OAuth shape test and the lane check (``anthropic_provider.lane_accepts_token``).
+CONSOLE_KEY_PREFIXES = ("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")
+
+
 def _is_oauth_token(key: str) -> bool:
     """True for Anthropic OAuth/setup tokens (sk-ant-oat*, eyJ JWTs, cc-); False for the Console
-    API-key families sk-ant-api*, sk-ant-usr*, sk-ant-svc* and sk-ant-admin* (#133856) — they pay
-    per token and authenticate as x-api-key, so the Claude Code identity must not ride along.
-    Unknown sk-ant-* prefixes still classify as OAuth so OAuth prefixes Anthropic ships later keep working."""
-    if not key or key.startswith(("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")):
+    API-key families (``CONSOLE_KEY_PREFIXES``) — they pay per token and authenticate as
+    x-api-key, so the Claude Code identity must not ride along. Unknown sk-ant-* prefixes still
+    classify as OAuth so OAuth prefixes Anthropic ships later keep working."""
+    if not key or key.startswith(CONSOLE_KEY_PREFIXES):
         return False
     return key.startswith(("sk-ant-", "eyJ", "cc-"))
 
@@ -78,7 +95,7 @@ def is_native_anthropic_host(base_url: Any) -> bool:
 def anthropic_route_is_oauth(base_url: Any, credential: Any, *, provider: Optional[str] = None) -> bool:
     """Claude Code OAuth identity for one Anthropic Messages route (#114967).
 
-    The route qualifies when it is the ``anthropic`` provider itself or its host is exactly
+    The route qualifies when it is a native Anthropic provider itself or its host is exactly
     ``api.anthropic.com`` (an empty base_url is the native default) — a named custom provider
     pointed at the native host carries the same identity, while third-party Anthropic-protocol
     endpoints never do (Claude Code headers and tool-name transforms 401/403 there). ``credential``
@@ -86,7 +103,7 @@ def anthropic_route_is_oauth(base_url: Any, credential: Any, *, provider: Option
     materialized once for the shape test (``CommandTokenSource`` caches, so this never double-mints)
     and a mint failure classifies as non-OAuth — the wire client surfaces the real error.
     """
-    if not (is_native_anthropic_host(base_url) or (provider or "").strip().lower() == "anthropic"):
+    if not (is_native_anthropic_host(base_url) or is_anthropic_provider(provider)):
         return False
     if callable(credential) and not isinstance(credential, str):
         try:
@@ -496,7 +513,7 @@ def _refresh_oauth_token(creds: dict[str, Any]) -> Optional[str]:
             # Another process may have spent this token and lost the commit; its sidecar verdict is authoritative.
             if is_rotation_consumed_uncommitted(refresh_token, source_path=cred_path):
                 logger.debug("Refresh token was already consumed by an uncommitted rotation "
-                             "- refusing to replay it; run 'hermes auth add anthropic'")
+                             "- refusing to replay it; run 'hermes auth add anthropic-oauth'")
                 return None
             fingerprint = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()[:32]
             if fingerprint in _DEAD_REFRESH_TOKEN_FINGERPRINTS:
@@ -509,7 +526,7 @@ def _refresh_oauth_token(creds: dict[str, Any]) -> Optional[str]:
                     _DEAD_REFRESH_TOKEN_FINGERPRINTS.add(fingerprint)
                     logger.warning(
                         "Claude Code OAuth refresh token is terminally invalid (%s); Hermes cannot use this "
-                        "login. Run 'hermes auth add anthropic' to give Hermes its own login.", e)
+                        "login. Run 'hermes auth add anthropic-oauth' to give Hermes its own login.", e)
                 else:
                     logger.debug("Failed to refresh Claude Code token: %s", e)
                 return None
@@ -524,7 +541,7 @@ def _refresh_oauth_token(creds: dict[str, Any]) -> Optional[str]:
                 logger.error(
                     "Anthropic OAuth refresh rotated the single-use token but could not "
                     "commit it to %s (%s) — treating the refresh as failed; "
-                    "run 'hermes auth add anthropic' to give Hermes its own login",
+                    "run 'hermes auth add anthropic-oauth' to give Hermes its own login",
                     cred_path, e,
                 )
                 mark_rotation_consumed_uncommitted(
@@ -632,7 +649,7 @@ def _resolve_claude_code_token_from_credentials(creds: Optional[dict[str, Any]] 
     logger.debug("Claude Code credentials expired — attempting refresh")
     refreshed = _refresh_oauth_token(creds)
     if not refreshed:
-        logger.debug("Token refresh failed — run 'hermes auth add anthropic' to give Hermes its own login")
+        logger.debug("Token refresh failed — run 'hermes auth add anthropic-oauth' to give Hermes its own login")
     return refreshed or None
 
 
@@ -648,13 +665,15 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[dict[s
     return None
 
 
-def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[str]:
-    """First available Anthropic OAuth token from credential_pool, read-only: enumerates with ``clear_expired=False,
+def _resolve_anthropic_pool_token(
+    *, provider: str = ANTHROPIC_OAUTH_PROVIDER, skip_borrowed: bool = False,
+) -> Optional[str]:
+    """First available token of *provider*'s lane from credential_pool, read-only: enumerates with ``clear_expired=False,
     refresh=False`` (never ``select()``) so diagnostic call sites (account_usage, ``hermes models``) never mutate
     auth.json or hit the network; refresh-on-expiry belongs to the API call path's pool recovery."""
     try:
-        from agent.credential_pool import AUTH_TYPE_OAUTH, load_pool
-        entries, _pending = load_pool("anthropic")._available_entries(clear_expired=False, refresh=False)
+        from agent.credential_pool import load_pool
+        entries, _pending = load_pool(provider)._available_entries(clear_expired=False, refresh=False)
     except Exception:
         logger.debug("Failed to read Anthropic credential_pool", exc_info=True)
         return None
@@ -663,7 +682,7 @@ def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[st
             continue
         # access_token may be an explicit null on a persisted entry; None.strip() would crash the resolver.
         token = (getattr(entry, "access_token", None) or "").strip()
-        if getattr(entry, "auth_type", None) != AUTH_TYPE_OAUTH or not token:
+        if not token or not lane_accepts_token(provider, token):
             continue
         # load_pool() re-seeds rows from the singleton files, so a spent-but-uncommitted rotation
         # (possibly from another process) looks healthy here.
@@ -678,17 +697,20 @@ def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[st
     return None
 
 
-def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Optional[str]:
-    """Return *token* unless the pool holds an active cooldown for it on *model*.
+def _available_anthropic_token(token: Optional[str], model: Optional[str], provider: str) -> Optional[str]:
+    """Return *token* unless it belongs to the other billing lane, or *provider*'s pool holds an
+    active cooldown for it on *model*.
 
-    Only model-aware callers (the API-call paths) are gated: diagnostics that
+    Only model-aware callers (the API-call paths) are gated by cooldowns: diagnostics that
     resolve a token without a model (usage display, model discovery) keep it.
     """
-    if not token or not model:
-        return token or None
+    if not token or not lane_accepts_token(provider, token):
+        return None
+    if not model:
+        return token
     try:
         from agent.credential_pool import load_pool
-        if load_pool("anthropic").token_is_blocked(token, model=model):
+        if load_pool(provider).token_is_blocked(token, model=model):
             return None
     except Exception:
         # Credential discovery must remain available when the pool store is
@@ -697,24 +719,27 @@ def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Op
     return token
 
 
-def resolve_anthropic_token(*, model: Optional[str] = None) -> Optional[str]:
-    """Resolve an Anthropic token from all sources in priority order (see module docstring).
+def resolve_anthropic_token(*, model: Optional[str] = None, provider: str = ANTHROPIC_API_PROVIDER) -> Optional[str]:
+    """Resolve a token for one Anthropic billing lane in priority order (see module docstring).
 
-    With *model*, a token the credential pool has benched for that model resolves to ``None``
+    With *model*, a token the lane's credential pool has benched for that model resolves to ``None``
     instead of being handed straight back to the caller that just saw it rate-limited."""
+    if str(provider or "").strip().lower() != ANTHROPIC_OAUTH_PROVIDER:
+        return _available_anthropic_token(
+            _lane_env(ANTHROPIC_API_PROVIDER, "ANTHROPIC_API_KEY")
+            or _resolve_anthropic_pool_token(provider=ANTHROPIC_API_PROVIDER),
+            model, ANTHROPIC_API_PROVIDER,
+        )
     _read_creds = functools.cache(read_claude_code_credentials)  # read the file at most once per resolve
-    token = _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    token = _lane_env(ANTHROPIC_OAUTH_PROVIDER, "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     if token:
         return _available_anthropic_token(
-            _prefer_refreshable_claude_code_token(token, _read_creds()) or token, model,
+            _prefer_refreshable_claude_code_token(token, _read_creds()) or token, model, ANTHROPIC_OAUTH_PROVIDER,
         )
-    api_key = _first_env("ANTHROPIC_API_KEY")  # an explicit API key must not be shadowed by discovered OAuth creds
-    if api_key:
-        return _available_anthropic_token(api_key, model)
     # The pool's claude_code row mirrors the same externally owned refresh grant.
     return _available_anthropic_token(
         _resolve_anthropic_pool_token(skip_borrowed=True) or _resolve_claude_code_token_from_credentials(_read_creds()),
-        model,
+        model, ANTHROPIC_OAUTH_PROVIDER,
     )
 
 

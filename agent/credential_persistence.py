@@ -14,7 +14,7 @@ from typing import Any, Dict, Mapping
 # non-manual source is borrowed/reference-only so new external providers fail
 # closed at the disk boundary.
 _PERSISTABLE_PROVIDER_SOURCES = frozenset({
-    ("anthropic", "hermes_pkce"),
+    ("anthropic-oauth", "hermes_pkce"),
     ("minimax-oauth", "oauth"),
     ("nous", "device_code"),
     ("openai-codex", "device_code"),

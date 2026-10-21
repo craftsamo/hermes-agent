@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+from agent.anthropic_provider import is_anthropic_provider
 from utils import base_url_host_matches
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ def reinstall_runtime_snapshot(agent: Any, rt: dict[str, Any]) -> None:
     # Default to native layout for snapshots predating the native-vs-proxy split.
     agent._use_native_cache_layout = rt.get(
         "use_native_cache_layout",
-        agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
+        agent.api_mode == "anthropic_messages" and is_anthropic_provider(agent.provider),
     )
     # An operator cache disable (_cache_disabled) must survive snapshot restoration.
     if getattr(agent, "_cache_disabled", False):

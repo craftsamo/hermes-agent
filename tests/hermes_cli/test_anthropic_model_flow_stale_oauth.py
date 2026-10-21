@@ -1,15 +1,15 @@
 """Tests for Bug #12905 fix — stale OAuth token detection in hermes model flow.
 
-Bug 3: `hermes model` with `provider=anthropic` skips OAuth re-authentication
-when a stale ANTHROPIC_TOKEN exists in ~/.hermes/.env but no valid
-Claude Code credentials are available. The fast-path silently proceeds to
-model selection with a broken token instead of offering re-auth.
+Bug 3: `hermes model` with the Claude subscription provider (``anthropic-oauth``)
+skips OAuth re-authentication when a stale ANTHROPIC_TOKEN exists in
+~/.hermes/.env but no valid Claude Code credentials are available. The fast-path
+silently proceeds to model selection with a broken token instead of offering re-auth.
 """
 
 from hermes_cli.config import save_env_value
 
 class TestStaleOAuthTokenDetection:
-    """Bug 3: stale OAuth token must trigger needs_auth=True in _model_flow_anthropic."""
+    """Bug 3: stale OAuth token must trigger needs_auth=True in _model_flow_anthropic_oauth."""
 
     def test_stale_oauth_token_triggers_reauth(self, tmp_path, monkeypatch, capsys):
         """
@@ -47,17 +47,15 @@ class TestStaleOAuthTokenDetection:
             lambda creds=None: None,
         )
 
-        # Simulate user types "3" (Cancel) when prompted for re-auth
-        monkeypatch.setattr("builtins.input", lambda _: "3")
-        monkeypatch.setattr("hermes_cli.secret_prompt.masked_secret_prompt", lambda _: "")
-
-        from hermes_cli.model_setup_flows import _model_flow_anthropic
-        cfg = {}
-
-        _model_flow_anthropic(cfg)
-
-        output = capsys.readouterr().out
-        # Must show auth method choice since token is stale
-        assert "subscription" in output or "API key" in output, (
-            f"Expected auth method menu but got: {output!r}"
+        # Re-auth is the subscription login flow; record that it is reached and decline it.
+        reauth_calls = []
+        monkeypatch.setattr(
+            "hermes_cli.main_provider_setup._run_anthropic_oauth_flow",
+            lambda save_fn: reauth_calls.append(save_fn) or False,
         )
+
+        from hermes_cli.model_setup_flows import _model_flow_anthropic_oauth
+
+        _model_flow_anthropic_oauth({})
+
+        assert reauth_calls, "a stale subscription token must route to re-authentication"
