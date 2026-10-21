@@ -8,8 +8,10 @@ Covers the three seams the integration relies on:
   returns False so every legacy ``browser_*`` tool (including
   browser_cdp/browser_dialog, whose check_fns funnel through it) is hidden,
   and ``browser_exec`` is advertised instead.
-* ``browser_exec`` execution — code is piped on stdin, ``session`` becomes
-  ``BU_NAME``, bad session names and a missing CLI produce actionable errors.
+* ``browser_exec`` execution — code is piped on stdin, ``session`` keys provider caches
+  and remains in results while CDP execution uses a derived Hermes-owned daemon name;
+  bad session names and a missing CLI produce actionable errors. The owned-daemon
+  lifecycle itself lives in test_browser_use_target_scope.py.
 """
 import json
 import os
@@ -23,9 +25,27 @@ import pytest
 import psutil
 
 import tools.browser_use_cli as bu_cli
+import tools.browser_use_cli_target as bu_target
 from tools import browser_tool_install as bt_install
 from tools import browser_tool_cloud as bt_cloud
 from tools import browser_tool_session as bt_session
+
+
+@pytest.fixture(autouse=True)
+def _fake_target_lifecycle(monkeypatch):
+    """Routing tests use shell CLIs, not daemons: run them straight through the facade's group
+    runner under the derived owned name. The target-scope suite exercises the real lifecycle."""
+
+    def run(cmd, code, env, session, task_id, timeout, *, sidecar=False):
+        env["BU_NAME"] = _owned_name(session, task_id, sidecar)
+        return bu_cli._run_cli_killing_process_group(cmd, code, env, timeout)
+
+    monkeypatch.setattr(bu_target, "run_targeted", run)
+
+
+def _owned_name(session, task_id, sidecar=False):
+    """The owned daemon a CDP-routed call runs in (``browser_use_cli_target.run_targeted``)."""
+    return "hermes-" + bu_target._scope_key(bu_cli.get_hermes_home(), session, task_id, sidecar)[:24]
 
 
 @pytest.fixture(autouse=True)
@@ -253,30 +273,38 @@ class TestVaultSupervisorAttach:
 
 
 class TestBackendSwapRetargetsDaemons:
-    def test_browser_swap_restarts_every_daemon_on_the_new_endpoint(self, tmp_path, monkeypatch):
-        """/browser connect|disconnect swap the endpoint inside cleanup_all_browsers(). The harness daemon
-        latches BU_CDP_* when it starts and outlives every call, so without a stop there every later
-        browser_exec, named or not, kept driving the browser from before the swap."""
+    def test_browser_swap_restarts_untargeted_daemons_only(self, tmp_path, monkeypatch):
+        """/browser connect|disconnect reap browsers inside cleanup_all_browsers(). An untargeted harness
+        daemon (BU direct cloud) outlives every call, so the swap stops the ones this process drove. A
+        CDP-routed call runs in an owned daemon that rolls over with the selected endpoint
+        (test_browser_use_target_scope.py), so it is never recorded and the global default daemon is
+        never reloaded on its behalf."""
         from tools.browser_tool_lifecycle import cleanup_all_browsers
 
-        # Like browser-harness: one daemon per BU_NAME latches its first endpoint; --reload stops it.
+        reloads = tmp_path / "reloads"
         cli = _fake_cli(tmp_path, f'''
-latch="{tmp_path}/daemon-${{BU_NAME:-default}}"
-if [ "${{1:-}}" = "--reload" ]; then rm -f "$latch"; exit 0; fi
+if [ "${{1:-}}" = "--reload" ]; then echo "${{BU_NAME:-default}}" >> "{reloads}"; exit 0; fi
 cat > /dev/null
-[ -f "$latch" ] || echo "$BU_CDP_URL" > "$latch"
-cat "$latch"
+echo "bu:${{BU_NAME:-default}}"
 ''')
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        monkeypatch.setattr(bu_cli, "_driven_daemons", {})
         monkeypatch.setattr("tools.browser_tool_cdp._resolve_cdp_override", lambda url: url)
         drive = lambda **kw: json.loads(bu_cli.browser_exec("print(1)", task_id="t-swap", **kw))["output"].strip()
 
         monkeypatch.setenv("BROWSER_CDP_URL", "http://127.0.0.1:9400")
-        assert drive() == drive(session="research") == "http://127.0.0.1:9400"
-
+        assert drive().startswith("bu:hermes-") and drive(session="research").startswith("bu:hermes-")
         cleanup_all_browsers()
-        monkeypatch.setenv("BROWSER_CDP_URL", "http://127.0.0.1:9401")
-        assert drive() == drive(session="research") == "http://127.0.0.1:9401"
+        assert not reloads.exists()
+
+        monkeypatch.delenv("BROWSER_CDP_URL")
+        monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: "")
+        monkeypatch.setattr("tools.browser_tool_cloud._get_cloud_provider",
+                            lambda: type("Provider", (), {"name": "browser-use"})())
+        monkeypatch.setenv("BROWSER_USE_API_KEY", "test-key")  # direct cloud mode needs its key
+        assert (drive(), drive(session="research")) == ("bu:default", "bu:research")
+        cleanup_all_browsers()
+        assert sorted(reloads.read_text(encoding="utf-8").split()) == ["default", "research"]
 
 
 class TestVaultEgressRedaction:
@@ -522,7 +550,8 @@ class TestBackendCdpResolution:
         result = json.loads(bu_cli.browser_exec("print(1)", session="r7k2"))
         assert result["success"] is True
         assert seen == ["bu-named-r7k2"]
-        assert "bu:r7k2" in result["output"]
+        assert "bu:hermes-" in result["output"]
+        assert result["session"] == "r7k2"
         assert "ws:wss://browser.example/cdp/bu-named-r7k2" in result["output"]
 
     def test_named_session_key_stable_across_tasks(self, monkeypatch):
@@ -1005,11 +1034,11 @@ class TestBrowserExec:
         assert 'got:print("hi")' in result["output"]
         assert "session" not in result
 
-    def test_session_sets_bu_name(self, tmp_path, monkeypatch):
+    def test_session_preserved_with_internal_daemon_name(self, tmp_path, monkeypatch):
         cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "bu:$BU_NAME"\n')
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
         result = json.loads(bu_cli.browser_exec("print(1)", session="r7k2"))
-        assert "bu:r7k2" in result["output"]
+        assert "bu:hermes-" in result["output"]
         assert result["session"] == "r7k2"
 
     def test_invalid_session_name_rejected(self, monkeypatch, tmp_path):
@@ -1342,14 +1371,16 @@ class TestExecHybridPrivateUrlRouting:
         else:
             assert result["success"] is True, result
             assert [k for k, *_ in self.local_keys] == ["t::local"]
-            assert result["output"] == "_local_default"
+            assert result["output"] == _owned_name("", "t", sidecar=True)
 
     def test_sidecar_route_has_its_own_daemon_and_sticks_for_url_less_calls(self):
         """The harness daemon reads BU_CDP_* once at spawn, so the sidecar must not share the cloud
         route's daemon; a follow-up with no URL literal keeps driving the page the last call opened."""
-        steps = [('new_tab("https://example.com/")', "default"),
-                 (f'new_tab("{self.LAN}")', "_local_default"),
-                 ('print(js("document.title"))', "_local_default")]
+        main, sidecar = _owned_name("", "t"), _owned_name("", "t", sidecar=True)
+        assert main != sidecar
+        steps = [('new_tab("https://example.com/")', main),
+                 (f'new_tab("{self.LAN}")', sidecar),
+                 ('print(js("document.title"))', sidecar)]
 
         daemons = [json.loads(bu_cli.browser_exec(code, task_id="t"))["output"] for code, _ in steps]
 

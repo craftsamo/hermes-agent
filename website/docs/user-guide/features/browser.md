@@ -199,6 +199,15 @@ same [headed-mode](#headed-mode-visible-browser-window) toggle applies —
 real-profile browsing too. On a display-less host (servers, CI) it always runs
 headless regardless.
 
+New headless normally advertises itself as `HeadlessChrome/<version>`, and some
+sites gate on that string alone — WhatsApp Web, for one, answers a perfectly
+current headless browser with its "WhatsApp works with Google Chrome 100+"
+update page. The headless launch therefore advertises the **same version** your
+browser actually reports, under the ordinary `Chrome/` token. Nothing else about
+the browser changes, and headed mode is untouched. Note that overriding the user
+agent also clears the User-Agent Client Hints brand list (`navigator.userAgentData.brands`
+comes back empty), which is the standard Chromium trade-off for this flag.
+
 If your browser has several profiles (say a work profile and a personal one)
 and you don't want "whichever profile you touched last" deciding the agent's
 identity, pin the snapshot source explicitly:
@@ -213,6 +222,32 @@ browser:
 A pin naming a profile directory that doesn't exist never silently falls back to
 the last-used profile: the agent gets a fresh browser without your logins and a
 message naming the bad pin.
+
+:::note macOS: the snapshot browser blocks Dock launches of the same app
+macOS treats every process running out of one app bundle as one application.
+While the headless snapshot browser launched from `/Applications/<Browser>.app`
+is alive, clicking that browser in the Dock (or Spotlight, or `open -a`) only
+activates the headless instance, so your everyday browser will not open until
+Hermes exits. To keep both usable, launch the snapshot from an APFS clone of the
+bundle at another path — it has no shared LaunchServices identity, and because
+the clone's code signature is untouched, the Keychain `Safe Storage` entry still
+lets it decrypt your cookies:
+
+```bash
+cp -Rc "/Applications/Brave Browser.app" "$HOME/.hermes/Brave Agent.app"
+```
+
+```yaml
+# ~/.hermes/config.yaml
+browser:
+  use_real_profile: true
+  real_profile_binary: "~/.hermes/Brave Agent.app/Contents/MacOS/Brave Browser"
+```
+
+Re-clone after the browser updates (the copy is a snapshot of the binary, not
+a link). A path that is not an executable fails closed rather than falling back
+to the real bundle.
+:::
 
 When you turn the toggle back off, Hermes deletes the snapshot store
 (`~/.hermes/browser-profile/`) on the next browser use, so the copied

@@ -20,6 +20,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -27,7 +28,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent.proxy_bypass import is_loopback_host
+from hermes_cli import browser_connect_cookie_merge as _cookie_merge
+from hermes_cli import browser_connect_prep as _prep
 from hermes_constants import get_hermes_home
+from hermes_platform.host import facts
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +369,9 @@ _SNAPSHOT_IGNORES = (
     "OptimizationGuide*", "optimization_guide_model_store", "Safe Browsing", "SafetyTips",
     "OnDeviceHeadSuggestModel", "segmentation_platform", "Sync Data", "Shared Dictionary",
     "History*",         # large; not needed for auth
+    "Sessions",         # the user's open tabs; restoring their browsing into the agent's
+                        # copy is both a privacy leak and dead weight (see
+                        # tools.browser_tool_real_profile._purge_session_restore_state)
     "Favicons*",
     "Singleton*",       # live-instance symlinks; never valid in a copy
     "RunningChromeVersion", "SingletonSocket", "*.tmp",
@@ -441,7 +448,9 @@ _OPTIONAL_AUTH_BACKUP_DEADLINE_S = 0.5
 
 def _copy_auth_file(src_file: str, dst_file: str, *, deadline_s: float | None = None) -> str | None:
     """Copy auth state; returns None on success, else WHY the file could not be snapshotted.
-    A DB that cannot be backed up consistently within the deadline is refused, never raw-copied."""
+    A DB that cannot be backed up consistently within the deadline is refused, never raw-copied.
+    An exhausted preparation budget raises ``PreparationTimeout`` instead of a reason."""
+    _prep.remaining()
     os.makedirs(os.path.dirname(dst_file), exist_ok=True)
     try:
         if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
@@ -454,7 +463,10 @@ def _copy_auth_file(src_file: str, dst_file: str, *, deadline_s: float | None = 
                 # the all-locked message tells the user to quit the browser.
                 before = total if last_remaining[0] is None else last_remaining[0]
                 last_remaining[0] = remaining
-                if _status != sqlite3.SQLITE_DONE and time.monotonic() >= deadline:
+                if _status == sqlite3.SQLITE_DONE:
+                    return
+                _prep.remaining()  # the call's budget outranks this DB's own deadline
+                if time.monotonic() >= deadline:
                     if remaining < before:
                         raise TimeoutError(f"SQLite backup exceeded {_AUTH_BACKUP_DEADLINE_S:g}s "
                                            "while still making progress")
@@ -470,16 +482,22 @@ def _copy_auth_file(src_file: str, dst_file: str, *, deadline_s: float | None = 
         else:
             shutil.copy2(src_file, dst_file)
         return None
+    except _prep.PreparationTimeout:
+        raise  # not a per-file reason: the whole preparation is out of time
     except (OSError, sqlite3.Error) as e:
         # A raw DB copy can lose committed WAL or overwrite a locked destination.
         logger.debug("real-profile: could not copy %s: %s", src_file, e)
         return str(e) or type(e).__name__
 
 
-def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> dict[str, str]:
+def _mirror_profile_auth(src: str, dst: str, source_profile: str,
+                         merge_cookies: bool = False) -> dict[str, str]:
     """Mirror ``source_profile``'s auth files into the copy's ``Default`` (agent-browser opens it);
     returns ``{relative name: reason}`` for the session-cookie DBs that could NOT be copied ({} =
-    the signed-in state is usable). Locked password/autofill DBs are logged and skipped."""
+    the signed-in state is usable). Locked password/autofill DBs are logged and skipped. With
+    ``merge_cookies`` (the copy is a completed snapshot of this same source profile) its cookie
+    store is merged row-wise rather than overwritten (``browser_connect_cookie_merge``), so a
+    cookie the copy rotated survives; another profile's copy is always overwritten."""
     failed: dict[str, str] = {}
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
@@ -487,8 +505,11 @@ def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> dict[str, s
             continue
         base = os.path.basename(rel)
         session_db = base in _SESSION_AUTH_DBS
-        reason = _copy_auth_file(s, os.path.join(dst, "Default", rel),
-                                 deadline_s=None if session_db else _OPTIONAL_AUTH_BACKUP_DEADLINE_S)
+        d = os.path.join(dst, "Default", rel)
+        if merge_cookies and session_db:
+            reason = _cookie_merge.refresh_auth_file(s, d)
+        else:
+            reason = _copy_auth_file(s, d, deadline_s=None if session_db else _OPTIONAL_AUTH_BACKUP_DEADLINE_S)
         if not reason or base not in _SQLITE_AUTH_DBS:
             continue
         if session_db:
@@ -520,20 +541,47 @@ _SNAPSHOT_DONE_MARKER = ".hermes-snapshot-complete"
 _PROFILE_LOCKED_PREFIX = "[profile-locked] "
 
 
-def _profile_is_locked(src: str, source_profile: str) -> bool:
-    """True when the active profile's cookie DB can't be opened (browser running). On Windows a
-    running browser holds Cookies deny-all (PermissionError); this FAST probe fails closed BEFORE
-    the heavy snapshot so a locked profile never hangs the launch. Always False on POSIX."""
+def _cookie_db_denied(src: str, source_profile: str) -> bool:
+    """True when the active profile's cookie DB exists but opening it raises PermissionError."""
     db = _first_present(  # modern Network/ location first
         os.path.join(src, source_profile, rel)
         for rel in (os.path.join("Network", "Cookies"), "Cookies"))
     if not db:
-        return False  # nothing to lock; let the copy path handle "no cookies"
+        return False  # nothing to deny; let the copy path handle "no cookies"
     try:
         with open(db, "rb"):
             return False
-    except OSError as e:  # other OSErrors are transient — don't declare locked; let the copy try
+    except OSError as e:  # other OSErrors are transient — don't declare denied; let the copy try
         return isinstance(e, PermissionError)
+
+
+def _profile_is_locked(src: str, source_profile: str, os_family: str | None = None) -> bool:
+    """True when the active profile's cookie DB can't be opened because the browser is running.
+    On Windows a running browser holds Cookies deny-all (PermissionError); this FAST probe fails
+    closed BEFORE the heavy snapshot so a locked profile never hangs the launch. Always False on
+    POSIX, where a PermissionError is an access denial, not a lock (``_profile_access_denied_error``)."""
+    if (os_family or facts.os_family()) != "win32":
+        return False
+    return _cookie_db_denied(src, source_profile)
+
+
+def _profile_access_denied_error(browser: str, src: str, source_profile: str,
+                                 os_family: str | None = None) -> str | None:
+    """Fail-closed message when the OS refuses this process read access to the profile (macOS
+    privacy protection of another app's data, file permissions), else None. NOT a lock: quitting the
+    browser or ``close-profile`` changes nothing, so this carries no ``_PROFILE_LOCKED_PREFIX``."""
+    os_family = os_family or facts.os_family()
+    if os_family == "win32" or not _cookie_db_denied(src, source_profile):
+        return None
+    if os_family == "darwin":
+        return (f"macOS denied this process read access to {browser}'s profile data, so its login "
+                f"data can't be copied. {browser} is not locked and quitting it will not help. Allow "
+                f"Full Disk Access for {os.path.realpath(sys.executable)} (or the app that launches "
+                "Hermes) in System Settings > Privacy & Security > Full Disk Access, restart that "
+                "process, and retry, or turn browser.use_real_profile off.")
+    return (f"permission denied reading {browser}'s profile data under {src!r}, so its login data "
+            "can't be copied. Fix the profile's ownership or permissions and retry, or turn "
+            "browser.use_real_profile off.")
 
 
 def _browser_setting(key: str):
@@ -568,6 +616,36 @@ def _resolve_source_profile(src: str) -> tuple[str | None, str | None]:
             f"— list them with: ls {src!r}. Fix the pin, or remove it to fall back to the "
             "last-used profile.")
     return _last_used_profile(src), None
+
+
+def _real_profile_binary() -> str | None:
+    """``browser.real_profile_binary``: an alternate executable to launch on the snapshot."""
+    path = _browser_setting("real_profile_binary")
+    return os.path.expanduser(path.strip()) if isinstance(path, str) and path.strip() else None
+
+
+def real_profile_executable(browser: str) -> tuple[str | None, str | None]:
+    """``(executable, error)`` for the real-profile launch: ``browser.real_profile_binary`` when set,
+    else the detected browser's own binary.
+
+    The override exists for macOS, where LaunchServices treats every process running out of one
+    app bundle as ONE app: while the headless snapshot browser launched from
+    ``/Applications/<Browser>.app`` is alive, a Dock / Spotlight / ``open`` launch of that same
+    bundle only activates it, so the user's everyday browser cannot be opened until Hermes exits.
+    A CLONE of the bundle at another path (``cp -Rc``, signature untouched) does not share that
+    identity but still decrypts the Keychain-protected cookies, because the ``Safe Storage`` ACL
+    matches on bundle identifier + team, not on path. A configured path that is not an executable
+    FAILS CLOSED — falling back to the real bundle would silently reintroduce the collision.
+    """
+    override = _real_profile_binary()
+    if override is None:
+        return chromium_executable(browser), None
+    if os.path.isfile(override) and os.access(override, os.X_OK):
+        return override, None
+    return None, (
+        f"browser.real_profile_binary is set to {override!r} but that is not an executable file. "
+        "Point it at the browser binary inside the bundle (e.g. '<Clone>.app/Contents/MacOS/<Browser>'), "
+        "or remove it to launch the detected browser's own binary.")
 
 
 def _real_profile_autoclose() -> bool:
@@ -694,16 +772,24 @@ def _copy_profile_tree(src: str, dst: str, source_profile: str) -> None:
     minus caches AND the SQLite auth DBs (raw copytree of a Chrome-held file raises on Windows);
     ``_mirror_profile_auth`` copies the DBs lock-aware instead."""
     dst_default = os.path.join(dst, "Default")
+
+    def copy_within_budget(source: str, destination: str):
+        _prep.remaining(60.0)
+        return shutil.copy2(source, destination)
+
     try:
         shutil.rmtree(dst_default, ignore_errors=True)
         shutil.copytree(
             os.path.join(src, source_profile),
             dst_default,
             dirs_exist_ok=True,
+            copy_function=copy_within_budget,
             symlinks=False,
             ignore=shutil.ignore_patterns(*_SNAPSHOT_IGNORES, *_SQLITE_AUTH_DBS),
             ignore_dangling_symlinks=True)
     except shutil.Error as multi:
+        # copytree collects OSErrors per file, an exhausted budget included: surface that first.
+        _prep.remaining(60.0)
         # Per-file failures (browser mid-write) are non-fatal.
         logger.info(
             "real-profile snapshot: %d file(s) skipped copying %s/%s",
@@ -742,7 +828,13 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
     completion marker is written only after full success, so a torn first copy (disk full, Ctrl+C)
     never looks "already populated" — it is redone from scratch. A locked live profile (Windows,
     browser running) reuses a completed snapshot of the same source profile without re-syncing;
-    only a missing or other-profile snapshot fails with the locked error."""
+    only a missing or other-profile snapshot fails with the locked error. Bounded by the
+    preparation budget (at most 60s); running out raises ``PreparationTimeout``."""
+    with _prep.budget(60.0):
+        return _snapshot_real_profile(browser, src)
+
+
+def _snapshot_real_profile(browser: str, src: str | None) -> tuple[str | None, str | None]:
     src = src or real_profile_data_dir(browser)
     if not src or not os.path.isdir(src):
         return None, (
@@ -752,6 +844,18 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
     if resolve_err or not source_profile:
         return None, resolve_err
     dst = real_profile_copy_dir(browser)
+    # A copy still held by a browser that could not be re-attached (lost daemon metadata, missing
+    # or recycled DevToolsActivePort) must not be overlaid or reused: rewriting its databases under
+    # it corrupts them, and a backup into a held file waits on that browser.
+    if _prep.snapshot_in_use(dst):
+        return None, ("the profile copy is still in use by a browser Hermes could not verify; "
+                      "refusing to overwrite its login data. Retry after that browser exits.")
+    # An OS-level denial (macOS privacy protection) would otherwise surface as skipped copies or a
+    # misleading "close the browser" message. Unlike a lock it does not clear by itself, so it is
+    # reported rather than served from an older copy.
+    denied = _profile_access_denied_error(browser, src, source_profile)
+    if denied:
+        return None, denied
     marker = os.path.join(dst, _SNAPSHOT_DONE_MARKER)
     # Only a copy that previously COMPLETED counts as populated; a half-written tree is
     # rebuilt — otherwise a torn first copy poisons freshness forever.
@@ -776,7 +880,7 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         if not populated:
             _copy_profile_tree(src, dst, source_profile)
         # Both paths: lock-aware auth DB copy into Default — also the per-launch re-sync.
-        failed_dbs = _mirror_profile_auth(src, dst, source_profile)
+        failed_dbs = _mirror_profile_auth(src, dst, source_profile, same_source)
         if failed_dbs:  # no session cookies: a "real profile" launch would be signed out
             return None, _unavailable_auth_dbs_error(browser, failed_dbs)
         _drop_singleton_leftovers(dst)
@@ -788,6 +892,8 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
             logger.debug("real-profile snapshot: could not write done marker: %s", e)
         # AFTER the marker write so the marker itself is covered; every pass, so old snapshots heal.
         _secure_snapshot(dst, contents=True)
+    except _prep.PreparationTimeout:
+        raise
     except OSError as e:
         return None, f"could not snapshot the '{browser}' profile into {dst}: {e}"
     return dst, None
