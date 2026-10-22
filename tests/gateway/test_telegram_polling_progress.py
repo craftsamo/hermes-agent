@@ -367,6 +367,88 @@ async def test_current_polling_generation_success_records_progress():
     assert generation > 0
 
 
+def _adapter_with_runner(profile=None):
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter.set_owner_profile(profile)
+    runner = MagicMock()
+    runner._redeliver_failed_obligations_for_platform = AsyncMock(return_value=0)
+    runner.retained = set()
+    runner._retain_background_task = runner.retained.add
+    adapter.gateway_runner = runner
+    return adapter, runner
+
+
+async def _drain_background(adapter):
+    tasks = adapter._background_tasks | adapter.gateway_runner.retained
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_in_place_send_path_recovery_redelivers_rejected_replies():
+    """Polling restarted in place (no replacement adapter): replies rejected with send_path_degraded
+    are replayed as soon as getUpdates progresses again, not at the next gateway restart."""
+    from gateway.config import Platform
+
+    adapter, runner = _adapter_with_runner(profile="assistant")
+    generation, _ = adapter._begin_polling_generation()
+    assert adapter._send_path_degraded is True
+
+    assert adapter._record_polling_progress(generation) is True
+    await _drain_background(adapter)
+
+    runner._redeliver_failed_obligations_for_platform.assert_awaited_once_with(
+        Platform.TELEGRAM, profile="assistant"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_redelivery_survives_adapter_only_teardown():
+    """The runner owns the replay: unserving one profile must not cancel it mid-batch."""
+    adapter, runner = _adapter_with_runner()
+    release = asyncio.Event()
+
+    async def _slow_redeliver(*_args, **_kwargs):
+        await release.wait()
+        return 1
+
+    runner._redeliver_failed_obligations_for_platform = _slow_redeliver
+    generation, _ = adapter._begin_polling_generation()
+    adapter._record_polling_progress(generation)
+    (task,) = runner.retained
+    assert task not in adapter._background_tasks
+
+    await adapter.cancel_background_tasks()
+    release.set()
+    await task
+
+    assert not task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_progress_on_a_healthy_send_path_does_not_sweep_again():
+    adapter, runner = _adapter_with_runner()
+    generation, _ = adapter._begin_polling_generation()
+    adapter._record_polling_progress(generation)
+    await _drain_background(adapter)
+    runner._redeliver_failed_obligations_for_platform.reset_mock()
+
+    adapter._record_polling_progress(generation)
+    await _drain_background(adapter)
+
+    runner._redeliver_failed_obligations_for_platform.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_path_recovery_without_a_runner_is_a_no_op():
+    adapter = _make_adapter()
+    adapter._running = True
+    generation, _ = adapter._begin_polling_generation()
+
+    assert adapter._record_polling_progress(generation) is True
+    assert not adapter._background_tasks
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
 async def test_unsuccessful_polling_request_does_not_record_progress(error_type):

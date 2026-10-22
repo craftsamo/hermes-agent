@@ -245,12 +245,9 @@ asyncio.run(main())
 
 def _strip_marker(content: str) -> tuple[str, bool]:
     """(reply body, carried a recovery marker?) for one journaled send."""
-    from gateway.delivery_ledger import FLOOD_MARKER, RECONNECTED_MARKER, RECOVERED_MARKER
+    from gateway.delivery_ledger import strip_recovery_prefix
 
-    for marker in (RECOVERED_MARKER, RECONNECTED_MARKER, FLOOD_MARKER):
-        if content.startswith(marker):
-            return content[len(marker):], True
-    return content, False
+    return strip_recovery_prefix(content)
 
 
 class Cell:

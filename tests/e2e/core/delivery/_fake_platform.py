@@ -678,13 +678,11 @@ class Copy:
 def visible_copies(msgs: list[PlatformMessage], aid: str) -> list[Copy]:
     """Every visible rendition of answer ``aid``: starts at a message carrying its header and spans
     split chunks until the footer. A copy without a footer is incomplete (truncated/stale preview)."""
-    markers = recovery_markers()
+    from gateway.delivery_ledger import strip_recovery_prefix
+
     cleaned = []
     for m in msgs:
-        text, marked = m.text, False
-        for mk in markers:
-            if text.startswith(mk):
-                text, marked = text[len(mk):], True
+        text, marked = strip_recovery_prefix(m.text)
         cleaned.append((m.message_id, _CHUNK_INDICATOR.sub("", text), marked))
     copies: list[Copy] = []
     h, f = header(aid), footer(aid)
