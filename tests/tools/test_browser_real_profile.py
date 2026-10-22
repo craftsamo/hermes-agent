@@ -259,6 +259,8 @@ class TestRealProfileCdpLaunch:
             (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n", encoding="utf-8")
             return FakeChrome()
 
+        proc = Mock(returncode=0, stdout="", stderr="")  # the UA probe's `--version`: unreadable
+
         with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
              patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)), \
@@ -268,6 +270,7 @@ class TestRealProfileCdpLaunch:
                           side_effect=[None, "http://127.0.0.1:41000"]), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
              patch.object(bt_session, "_popen_agent_browser", side_effect=fake_agent_browser_spawn), \
+             patch.object(bt.subprocess, "run", return_value=proc), \
              patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             bt_real_profile._real_profile_cdp()
@@ -280,8 +283,8 @@ class TestRealProfileCdpLaunch:
         # #100855: the attach daemon lives in a reaper-visible socket dir claimed by this
         # process, and never self-terminates (Chrome is ours, not the daemon's).
         socket_dir = captured["env"]["AGENT_BROWSER_SOCKET_DIR"]
-        assert socket_dir == str(tmp_path / f"agent-browser-{bt._REAL_PROFILE_SESSION}")
-        assert (tmp_path / f"agent-browser-{bt._REAL_PROFILE_SESSION}" / f"{bt._REAL_PROFILE_SESSION}.owner_pid").read_text(encoding="utf-8-sig") == str(os.getpid())
+        assert socket_dir == str(tmp_path / f"agent-browser-{bt._real_profile_session()}")
+        assert (tmp_path / f"agent-browser-{bt._real_profile_session()}" / f"{bt._real_profile_session()}.owner_pid").read_text(encoding="utf-8-sig") == str(os.getpid())
         assert "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in captured["env"]
         self._reset()
 
@@ -313,6 +316,7 @@ class TestRealProfileCdpLaunch:
                           side_effect=lambda s: closed.__setitem__("n", closed["n"] + 1)), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
              patch.object(bt_real_profile, "_capture_agent_browser_cli", return_value=proc), \
+             patch.object(bt.subprocess, "run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             cdp, _err = bt_real_profile._real_profile_cdp()
         assert closed["n"] == 1  # stale wrong-dir session was closed
@@ -894,20 +898,51 @@ class TestReviewRound3:
         (tmp_path / "Default").mkdir(parents=True)
         assert bc._profile_is_locked(str(tmp_path), "Default") is False
 
-    def test_lock_probe_true_on_permissionerror(self, tmp_path, monkeypatch):
-        import hermes_cli.browser_connect as bc
-        (tmp_path / "Default").mkdir(parents=True)
-        (tmp_path / "Default" / "Cookies").write_bytes(b"db")
+    @staticmethod
+    def _deny_cookie_open(monkeypatch):
         import builtins
         real_open = builtins.open
 
         def deny(path, *a, **k):
             if str(path).endswith("Cookies"):
-                raise PermissionError("locked")
+                raise PermissionError("denied")
             return real_open(path, *a, **k)
 
         monkeypatch.setattr(builtins, "open", deny)
-        assert bc._profile_is_locked(str(tmp_path), "Default") is True
+
+    @staticmethod
+    def _cookie_profile(root):
+        (root / "Default").mkdir(parents=True)
+        (root / "Default" / "Cookies").write_bytes(b"db")
+        return str(root)
+
+    def test_lock_probe_true_on_permissionerror_on_windows(self, tmp_path, monkeypatch):
+        import hermes_cli.browser_connect as bc
+        src = self._cookie_profile(tmp_path)
+        self._deny_cookie_open(monkeypatch)
+        assert bc._profile_is_locked(src, "Default", os_family="win32") is True
+
+    @pytest.mark.platforms("posix")
+    def test_permission_denial_is_not_reported_as_a_lock(self, tmp_path, monkeypatch):
+        """A running browser never denies reads on POSIX, so a PermissionError there (macOS privacy
+        protection of another app's data) must not read as "browser is running": quitting the
+        browser or ``close-profile`` cannot fix it."""
+        import hermes_cli.browser_connect as bc
+        src = self._multi(tmp_path / "real")
+        monkeypatch.setattr(bc, "get_hermes_home", lambda: tmp_path / "hh")
+        self._deny_cookie_open(monkeypatch)
+        dst, err = bc.snapshot_real_profile("brave", src=str(src))
+        assert dst is None
+        assert err and "denied" in err
+        assert not err.startswith(bc._PROFILE_LOCKED_PREFIX)
+
+    def test_access_denied_error_names_full_disk_access_off_windows_only(self, tmp_path, monkeypatch):
+        import hermes_cli.browser_connect as bc
+        src = self._cookie_profile(tmp_path)
+        self._deny_cookie_open(monkeypatch)
+        msg = bc._profile_access_denied_error("brave", src, "Default", os_family="darwin")
+        assert msg and "Full Disk Access" in msg
+        assert bc._profile_access_denied_error("brave", src, "Default", os_family="win32") is None
 
     def test_snapshot_fails_fast_when_locked(self, tmp_path, monkeypatch):
         """snapshot_real_profile always BLOCKS when locked — never kills, never
