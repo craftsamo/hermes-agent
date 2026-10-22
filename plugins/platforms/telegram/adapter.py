@@ -419,16 +419,39 @@ _RICH_PROTECTED_REGION_RE = re.compile(
 
 def _rich_normalize_linebreaks(text: str) -> str:
     """Convert lone ``\\n`` (a Markdown soft break) to hard breaks for sendRichMessage; ``\\n\\n``,
-    fenced code and pipe tables are left untouched."""
+    fenced code and pipe tables are left untouched.
+
+    A pipe table additionally needs a *blank line* on each side: a table cannot be opened from
+    inside an open paragraph (prose directly above it swallowed the whole table as literal
+    ``| a | b |`` text) and prose directly below it is absorbed as one more row. The single
+    boundary newline is therefore promoted to a paragraph break instead of a hard break. A fence
+    can interrupt a paragraph, so code-block boundaries are left alone."""
     if not text or '\n' not in text:
         return text
+
+    def _hard_breaks(prose: str) -> str:
+        return re.sub(r'(?<!\n)\n(?!\n)', '  \n', prose)
+
     out: list[str] = []
     pos = 0
     for m in _RICH_PROTECTED_REGION_RE.finditer(text):
-        out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', text[pos:m.start()]))
-        out.append(m.group(0))  # protected region kept verbatim
+        region = m.group(0)
+        is_table = not region.startswith('```')
+        prose = text[pos:m.start()]
+        if is_table and prose.endswith('\n') and not prose.endswith('\n\n'):
+            # Close the paragraph above the table instead of hard-breaking it.
+            out.append(_hard_breaks(prose[:-1]))
+            out.append('\n\n')
+        else:
+            out.append(_hard_breaks(prose))
+        out.append(region)  # protected region kept verbatim
         pos = m.end()
-    out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', text[pos:]))
+        if is_table and text.startswith('\n', pos) and not text.startswith('\n\n', pos):
+            # Same on the far side: keep the next prose line out of the table.
+            out.append('\n\n')
+            pos += 1
+    tail = text[pos:]
+    out.append(_hard_breaks(tail))
     return ''.join(out)
 
 
