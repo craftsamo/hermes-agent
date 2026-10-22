@@ -10,10 +10,14 @@ MAX_QUESTIONS = 5  # independent questions per call
 # Per-choice cap. Surfaces wrap long choice text (newlines kept), so anything longer is rejected here, at the
 # source, instead of a surface silently dropping a choice that ``choices_offered`` still reports as shown.
 MAX_CHOICE_CHARS = 8000
+# The material a question refers to (a plan, a draft, a comparison). Messaging surfaces deliver it as its
+# own message ahead of the card and split long text, so the cap only bounds a runaway argument.
+MAX_CONTEXT_CHARS = 20000
 # Applied to the first choice here (not per-surface) so every adapter renders it identically.
 RECOMMENDED_LABEL = "(Recommended)"
 _UNAVAILABLE = "Clarify tool is not available in this execution context."
-_SHAPE = "Pass questions=[{question, choices?, multi_select?}]; a single question is a one-entry array."
+_SHAPE = ("Pass questions=[{question, context?, choices?, multi_select?}]; a single question is a "
+          "one-entry array.")
 
 
 def mark_recommended(choices: list[str]) -> list[str]:
@@ -76,8 +80,15 @@ def _normalize_questions(questions) -> tuple:
                 return None, (f"questions[{index}].choices has {len(choices)} entries but all are blank. "
                               "Send real labels, or omit choices to ask open-ended.")
             choices = cleaned or None
+        context = item.get("context")
+        if context is not None and not isinstance(context, str):
+            return None, f"questions[{index}].context must be text."
+        context = (context or "").strip() or None
+        if context and len(context) > MAX_CONTEXT_CHARS:
+            return None, (f"questions[{index}].context is {len(context)} characters; the limit is "
+                          f"{MAX_CONTEXT_CHARS}. Summarize it, or put the full text in a file and reference it.")
         normalized.append({
-            "qid": f"q{index}", "question": text,
+            "qid": f"q{index}", "question": text, "context": context,
             "choices": mark_recommended(list(choices)) if choices else None,
             "choices_offered": list(choices) if choices else None,
             "multi_select": bool(item.get("multi_select")) and bool(choices)})
@@ -108,6 +119,16 @@ def _result(normalized: list[dict], reply: dict) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _for_callback(normalized: List[dict], callback: Callable) -> List[dict]:
+    """A surface that renders ``context`` itself marks its callback ``supports_clarify_context``
+    (the messaging gateway sends it as its own message ahead of the card). Any other surface gets
+    the context folded above the question text, so it is shown wherever the question is."""
+    if getattr(callback, "supports_clarify_context", False):
+        return normalized
+    return [dict(entry, question=f"{entry['context']}\n\n{entry['question']}") if entry.get("context") else entry
+            for entry in normalized]
+
+
 def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
     """Ask 1-5 questions in one call. ``callback(questions) -> {"answers", "outcome", "notice"?}``
     is platform injected (cli.py / gateway / tui_gateway) and receives the normalized list."""
@@ -120,7 +141,7 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
     # Observers see the questions only; the answers stay in the tool result.
     with human_input_request("clarify", prompt="\n".join(q["question"] for q in normalized)) as human:
         try:
-            reply = callback(normalized)
+            reply = callback(_for_callback(normalized, callback))
             human.outcome = str(reply.get("outcome") or "")
             return _result(normalized, reply)
         except Exception as exc:
@@ -148,7 +169,12 @@ CLARIFY_SCHEMA = {
         "open-ended (omit choices). Options go ONLY in `choices`, never "
         "enumerated inside the question text (choices render as pickable "
         "rows; options written into the question are dead prose the user "
-        "can't click). Result: {responses: [...], outcome} in question order. "
+        "can't click). The user sees only the question card and what you "
+        "already sent, never your reasoning: when a question refers to "
+        "something (\"this plan\", \"which draft?\", a file to review), put "
+        "that material in the question's `context` — it is delivered right "
+        "before the card, MEDIA: tags included. Result: {responses: [...], "
+        "outcome} in question order. "
         "Each response has status answered, skipped or unanswered "
         "(user_response is null unless answered); outcome is submitted, "
         "cancelled, timed_out or undelivered, with a notice saying why "
@@ -165,6 +191,7 @@ CLARIFY_SCHEMA = {
                 "maxItems": MAX_QUESTIONS,
                 "description": (
                     "The question(s). Each: question text (options excluded), "
+                    "optional context (the material it refers to), "
                     "optional choices (recommended first; omit for free-text), "
                     "optional multi_select. Responses come back in question "
                     "order with the question text echoed."
@@ -173,6 +200,16 @@ CLARIFY_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "question": {"type": "string"},
+                        "context": {
+                            "type": "string",  # no maxLength (#131278); MAX_CONTEXT_CHARS is enforced above
+                            "description": (
+                                "The plan, draft, comparison or files the question "
+                                "refers to, as the user should read it (markdown; "
+                                "MEDIA:/path tags attach files). Shown before the "
+                                "question. Omit when the question stands alone or "
+                                "the material was already sent as visible text."
+                            ),
+                        },
                         "choices": {
                             "type": "array",
                             "items": {"type": "string"},  # no maxLength: llama.cpp's grammar converter rejects >=2000 (#131278); the limit is enforced above
