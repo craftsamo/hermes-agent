@@ -40,6 +40,8 @@ from agent.turn_retry_state import TurnRetryState
 from agent.turn_scripted_prelude import Prelude, play_prelude
 # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
 # skewed phase mid-turn.
+from agent.anthropic_oauth_recovery import _MalformedAnthropicOAuthToolMarkup, handle_oauth_markup
+from agent.anthropic_oauth_replay import _sanitize_anthropic_oauth_replay_for_provider
 from agent.turn_api_call import handle_api_interrupt, nous_rate_limit_guard, perform_api_call
 from agent.turn_api_error import handle_api_error
 from agent.turn_api_request import build_api_request
@@ -1218,9 +1220,11 @@ def _peel_moa_guidance(messages: list[dict[str, Any]], guidance: Any) -> list[di
 def _redecorate_prompt_cache_for_provider(
     agent, api_messages: list[dict[str, Any]], *, system_message=None,
     moa_prepared: Optional[dict[str, Any]] = None, tools_for_api: Optional[list[dict[str, Any]]] = None,
+    anthropic_oauth_replay_entries: Optional[dict[int, dict[str, Any]]] = None,
 ) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]], list[dict[str, Any]]]:
     """Strip and re-apply cache_control for the *current* provider policy — failover
-    ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased."""
+    ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased;
+    malformed OAuth replay is re-rendered for the current destination."""
     messages: list[dict[str, Any]] = [dict(m) if isinstance(m, dict) else m for m in (api_messages or [])]
     prepared = moa_prepared
     guidance = prepared.get("guidance") if isinstance(prepared, dict) else None
@@ -1228,6 +1232,7 @@ def _redecorate_prompt_cache_for_provider(
         messages = _peel_moa_guidance(messages, guidance)
 
     strip_anthropic_cache_control(messages)
+    messages = _sanitize_anthropic_oauth_replay_for_provider(agent, messages, anthropic_oauth_replay_entries)
     planned_tools = strip_anthropic_tool_cache_control(
         tools_for_api if tools_for_api is not None else getattr(agent, "tools", [])
     )
@@ -1428,6 +1433,9 @@ class _LoopState:
     restart_count: int = 0
     _outer_error_count: int = 0  # outer-loop exceptions this turn (#92450), see _MAX_OUTER_LOOP_ERRORS
     truncated_tool_call_retries: int = 0
+    # Leaked OAuth invoke-markup recovery for the current API call (see anthropic_oauth_recovery).
+    anthropic_oauth_invoke_retries: int = 0
+    anthropic_oauth_invoke_recovery: bool = False
     truncated_response_parts: list[tuple[str, bool]] = field(default_factory=list)
     compression_attempts: int = 0
     _last_preflight_pressure: Optional[int] = None
@@ -1447,6 +1455,9 @@ class _LoopState:
     pending_moa_prepared_request: Any = None
     # Per-iteration slots.
     request_logger: Any = None
+    # Malformed OAuth replay provenance: source rows (prep) -> request entries (assembly).
+    _oauth_replay_targets: Any = None
+    _oauth_replay_entries: Any = None
     api_messages: Any = None
     tools_for_api: Any = None
     _moa_prepared_request: Any = None
@@ -1507,6 +1518,7 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[dict[str, Any]]:
 
     Returns a turn result dict when a phase ends the turn, else None once the loop is left
     (success, a restart armed on ``s._retry``, interrupt, or retries exhausted)."""
+    s.anthropic_oauth_invoke_retries, s.anthropic_oauth_invoke_recovery = 0, False
     while s.retry_count < s.max_retries:
         _ng = _run_phase(nous_rate_limit_guard, agent, s)
         if _ng.action == "return":
@@ -1521,6 +1533,12 @@ def _run_api_retry_loop(agent, s: _LoopState) -> Optional[dict[str, Any]]:
             if _rc.action == "return":
                 return _rc.result
             if _rc.action == "break":
+                return None
+        except _MalformedAnthropicOAuthToolMarkup as malformed:
+            _om = _run_phase(handle_oauth_markup, agent, s, malformed=malformed)
+            if _om.action == "return":
+                return _om.result
+            if _om.action == "break":
                 return None
         except InterruptedError:
             if _run_phase(handle_api_interrupt, agent, s).action == "break":
