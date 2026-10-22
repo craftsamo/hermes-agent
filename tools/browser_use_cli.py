@@ -6,6 +6,7 @@ instead of default browser tools
 
 import contextlib
 import functools
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -380,6 +381,29 @@ def _sidecar_daemon_name(name: str) -> str:
     spawn and outlives the call, so sharing the cloud route's daemon would relay a private URL to the
     cloud browser it is already attached to. User session names cannot start with ``_``."""
     return f"_local_{name or 'default'}"[:64]
+
+
+_TASK_DAEMON_PREFIX = "_task_"
+
+
+def _task_daemon_name(task_id: str) -> str:
+    """BU_NAME of the harness daemon an unnamed browser_exec of ``task_id`` drives. The harness reuses any
+    live daemon of a name, so one shared ``default`` let a task drive the browser another task's daemon
+    latched, or the same tab of a shared one; a named daemon gets its own tab and closes it on shutdown.
+    User session names cannot start with ``_``."""
+    return _TASK_DAEMON_PREFIX + hashlib.sha256(task_id.encode()).hexdigest()[:24]
+
+
+def _name_exec_daemon(env: dict, session: str, task_id: Optional[str]) -> str:
+    """Set the BU_NAME of the daemon a browser_exec drives: its session, else its task's; an operator's
+    BU_NAME stays. Returns the name its private-URL sidecar derives from (``""`` = default)."""
+    if session:
+        env["BU_NAME"] = session
+    elif task_id and "BU_NAME" not in env:
+        env["BU_NAME"] = _task_daemon_name(task_id)
+    else:
+        return ""
+    return env["BU_NAME"]
 
 
 def _export_real_profile_note(env: dict, key: str) -> None:
@@ -795,17 +819,16 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
                           "Run `hermes update` to re-sync it.")
 
     env = _base_subprocess_env()
-    if session:
-        if not _SESSION_RE.match(session):
-            return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
-                              "dashes, or underscores (e.g. 'r7k2').")
-        env["BU_NAME"] = session
+    if session and not _SESSION_RE.match(session):
+        return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
+                          "dashes, or underscores (e.g. 'r7k2').")
+    daemon_name = _name_exec_daemon(env, session, task_id)
     env, route_err, local_sidecar, generation = _route_exec_current(
         env, session, task_id, bool(local), local_sidecar, route_key)
     if route_err:
         return tool_error(route_err)
     if local_sidecar:
-        env["BU_NAME"] = _sidecar_daemon_name(session)
+        env["BU_NAME"] = _sidecar_daemon_name(daemon_name)
     _exec_route_is_sidecar[route_key] = local_sidecar
     bot_desktop_browser = bool(env.pop(_BOT_DESKTOP_BROWSER_SENTINEL, None))
 
