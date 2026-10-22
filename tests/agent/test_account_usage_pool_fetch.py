@@ -156,7 +156,7 @@ def test_anthropic_fetch_honors_explicit_api_key_and_marks_model_scoped_windows(
     monkeypatch.setattr(account_usage, "resolve_anthropic_token",
                         lambda **kw: (_ for _ in ()).throw(AssertionError("ambient token must not be consulted")))
 
-    snapshot = fetch_account_usage("anthropic", api_key="sk-ant-oat-explicit-token")
+    snapshot = fetch_account_usage("anthropic-oauth", api_key="sk-ant-oat-explicit-token")
 
     assert snapshot is not None
     assert called["headers"]["Authorization"] == "Bearer sk-ant-oat-explicit-token"

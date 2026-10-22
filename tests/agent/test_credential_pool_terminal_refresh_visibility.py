@@ -73,8 +73,8 @@ def test_terminal_refresh_quarantine_warns_with_reauth_hint(
 
 def test_anthropic_dead_grant_warns_and_marks_dead(monkeypatch, caplog):
     """A dead Anthropic grant is not a transient 'exhausted': WARNING with the re-auth hint, row DEAD."""
-    pool = _pool("anthropic")
-    entry = _entry("anthropic", source="manual:hermes_pkce")
+    pool = _pool("anthropic-oauth")
+    entry = _entry("anthropic-oauth", source="manual:hermes_pkce")
     pool._entries = [entry]
     monkeypatch.setattr(pool, "_sync_entry_from_pool_store", lambda e: e)
     monkeypatch.setattr(pool, "_persist", lambda *a, **k: None)

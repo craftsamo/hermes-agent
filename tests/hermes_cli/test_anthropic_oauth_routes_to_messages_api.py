@@ -41,15 +41,15 @@ class TestExplicitRuntimeForAnthropic:
 
     def test_explicit_args_route_to_messages_api(self):
         result = rp._resolve_explicit_runtime(
-            provider="anthropic",
-            requested_provider="anthropic",
+            provider="anthropic-oauth",
+            requested_provider="anthropic-oauth",
             model_cfg={},
             explicit_api_key="sk-ant-oat01-foo",
             explicit_base_url="https://api.anthropic.com",
         )
         assert result is not None
         assert result["api_mode"] == "anthropic_messages"
-        assert result["provider"] == "anthropic"
+        assert result["provider"] == "anthropic-oauth"
         assert result["base_url"] == "https://api.anthropic.com"
 
 

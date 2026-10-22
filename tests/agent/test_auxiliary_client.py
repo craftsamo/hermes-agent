@@ -640,7 +640,7 @@ class TestAnthropicOAuthFlag:
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
-            client, _model = _try_anthropic()
+            client, _model = _try_anthropic(provider="anthropic-oauth")
             assert client is not None
             assert isinstance(client, AnthropicAuxiliaryClient)
             # The adapter inside should have is_oauth=True
@@ -936,7 +936,7 @@ class TestExpiredCodexFallback:
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic
-            client, _model = _try_anthropic()
+            client, _model = _try_anthropic(provider="anthropic-oauth")
             assert client is not None
             adapter = client.chat.completions
             assert adapter._is_oauth is True
