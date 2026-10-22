@@ -406,6 +406,10 @@ def _name_exec_daemon(env: dict, session: str, task_id: Optional[str]) -> str:
     return env["BU_NAME"]
 
 
+def _is_task_daemon(identity: tuple[str, ...]) -> bool:
+    return identity[-1].startswith((_TASK_DAEMON_PREFIX, _sidecar_daemon_name(_TASK_DAEMON_PREFIX)))
+
+
 def _export_real_profile_note(env: dict, key: str) -> None:
     """The session layer decides real profile vs fresh browser once per key; carry its note (if it fell
     back) so the result reports the browser this call actually drives."""
@@ -751,6 +755,97 @@ def _reload_daemons(daemons) -> None:  # each ``daemon_identity`` daemon, with i
             _run_cli_killing_process_group([*cmd, "--reload"], "", daemon_env(env, daemon), 15)
 
 
+# Task daemons (``_task_daemon_name``) end when idle rather than at shutdown: one per task would otherwise
+# pile up, each holding a tab. The profile's next call stops them; the browser janitor cannot, as it runs
+# outside every profile scope. Guarded by ``_daemon_cv`` (the ``_driven_daemons`` lock).
+_TASK_DAEMON_IDLE_S = 600
+# Longest a call waits for its own daemon's idle stop: one --reload's 15 s bound plus the 10 s drain after a kill.
+_REAP_WAIT_S = 30
+_daemon_cv = threading.Condition(_driven_daemons_lock)
+_task_daemon_used: dict[tuple[str, ...], float] = {}  # identity -> monotonic time a call last started or ended
+_task_daemon_busy: dict[tuple[str, ...], int] = {}  # identity -> calls in flight
+_task_daemon_reaping: set = set()
+
+
+def _task_daemon_idle_s() -> float:
+    """The longer of ``_TASK_DAEMON_IDLE_S`` and the browser inactivity timeout, so a task's tab lives at
+    least as long as its browser session would."""
+    from tools import browser_tool
+    return max(_TASK_DAEMON_IDLE_S, getattr(browser_tool, "BROWSER_SESSION_INACTIVITY_TIMEOUT", 0) or 0)
+
+
+def _begin_daemon_call(env: dict, wait_s: float) -> Optional[tuple[str, ...]]:
+    """Register the daemon a call drives; None when its task daemon is still being stopped after
+    ``wait_s``, so the call must not run. A task daemon counts as busy until ``_end_daemon_call``, so the
+    reaper never stops it under a call."""
+    daemon = daemon_identity(env)
+    with _daemon_cv:
+        if _is_task_daemon(daemon):
+            if not _daemon_cv.wait_for(lambda: daemon not in _task_daemon_reaping, timeout=max(wait_s, 0)):
+                return None
+            _task_daemon_busy[daemon] = _task_daemon_busy.get(daemon, 0) + 1
+            _task_daemon_used[daemon] = time.monotonic()
+        _driven_daemons[daemon] = hermes_home_key()
+    return daemon
+
+
+def _end_daemon_call(daemon: tuple[str, ...]) -> None:
+    with _daemon_cv:
+        if daemon in _task_daemon_busy:
+            _task_daemon_busy[daemon] -= 1
+            if not _task_daemon_busy[daemon]:
+                del _task_daemon_busy[daemon]
+            _task_daemon_used[daemon] = time.monotonic()
+
+
+def _idle_task_daemons(idle_s: float, home_key: str) -> list:
+    """``home_key``'s task daemons no call used for ``idle_s`` and none is running; caller holds
+    ``_daemon_cv``. Drops the bookkeeping of daemons stopped some other way (a swap, a republish,
+    shutdown)."""
+    for daemon in [d for d in _task_daemon_used if d not in _driven_daemons]:
+        del _task_daemon_used[daemon]
+    now = time.monotonic()
+    return sorted(d for d, used in _task_daemon_used.items()
+                  if _driven_daemons[d] == home_key and now - used >= idle_s and not _task_daemon_busy.get(d))
+
+
+def reap_idle_task_daemons(home_key: str, idle_s: Optional[float] = None) -> None:
+    """Stop ``home_key``'s task daemons idle for ``idle_s`` (default ``_task_daemon_idle_s()``) through
+    the harness's ``--reload``; a later call of that task respawns one. Runs under that profile's scope,
+    which building the harness env needs. One daemon at a time, each re-checked just before its stop:
+    one a call picked up meanwhile keeps running, a call waits for one stop at most, and a shutdown still
+    finds every daemon not yet being stopped (the one in flight finishes in its own process group)."""
+    idle_s = _task_daemon_idle_s() if idle_s is None else idle_s
+    while True:
+        with _daemon_cv:
+            idle = _idle_task_daemons(idle_s, home_key)
+            if not idle:
+                return
+            daemon = idle[0]
+            del _task_daemon_used[daemon]
+            _driven_daemons.pop(daemon, None)
+            _task_daemon_reaping.add(daemon)
+        try:
+            _reload_daemons([daemon])
+        finally:
+            with _daemon_cv:
+                _task_daemon_reaping.discard(daemon)
+                _daemon_cv.notify_all()
+
+
+def _reap_idle_task_daemons_soon() -> Optional[threading.Thread]:
+    """Before a call: stop this profile's idle task daemons on a thread of its own scope, so the call
+    never waits for them. Returns that thread, if one started."""
+    from agent.memory_provider import spawn_context_thread
+    home_key = hermes_home_key()
+    with _daemon_cv:
+        if not _idle_task_daemons(_task_daemon_idle_s(), home_key):
+            return None
+    reaper = spawn_context_thread(reap_idle_task_daemons, name="browser-use-task-reaper", args=(home_key,))
+    reaper.start()
+    return reaper
+
+
 def _route_exec(env: dict, session: str, task_id: Optional[str], local: bool, local_sidecar: bool,
                 route_key: str) -> tuple[Optional[str], bool]:
     """``_route_backend`` for one browser_exec call; returns ``(error, runs on the local sidecar)``.
@@ -852,9 +947,10 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
 
     def dispatch() -> dict[str, Any]:
         _attach_vault_supervisor(env, task_id)
-        with _driven_daemons_lock:
-            daemon = daemon_identity(env)
-            _driven_daemons[daemon] = hermes_home_key()
+        daemon = _begin_daemon_call(env, min(_REAP_WAIT_S, timeout))
+        if daemon is None:
+            return {"error_result": tool_error(
+                "This task's browser daemon is still being stopped after sitting idle; nothing ran. Retry the call.")}
         try:
             return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
         except subprocess.TimeoutExpired:
@@ -865,7 +961,10 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             )}
         except OSError as e:
             return {"error_result": tool_error(f"Failed to launch browser-use CLI: {e}")}
+        finally:
+            _end_daemon_call(daemon)
 
+    _quiet(_reap_idle_task_daemons_soon, None, "idle task daemon reap failed")
     if bot_desktop_browser:
         from tools.browser_tool_session import run_fenced
         dispatched = run_fenced({"features": {"local": True}}, dispatch)
