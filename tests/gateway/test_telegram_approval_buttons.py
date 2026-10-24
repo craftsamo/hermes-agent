@@ -100,6 +100,25 @@ class TestTelegramExecApproval:
         assert kwargs["reply_markup"] is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("reason, shown", [
+        ("r" * 3000, "r" * 3000),  # whole, far past the 500-char floor
+        ("<r>" * 2000, "&lt;r&gt;" * 300),  # cut, but at ~3800 escaped chars rather than 500
+    ], ids=["whole", "cut"])
+    async def test_short_command_leaves_the_reason_the_rest_of_the_card(self, reason, shown):
+        """A plugin approval's command is a short label, so its reason may fill the card past the
+        500-char floor; the command is never cut for it and the card still fits the cap."""
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        command = "<github_change> (plugin approval rule)"
+
+        await adapter.send_exec_approval(chat_id="12345", command=command, session_key="s", description=reason)
+
+        text = adapter._bot.send_message.call_args.kwargs["text"]
+        assert utf16_len(text) <= adapter.MAX_MESSAGE_LENGTH
+        assert "<pre>&lt;github_change&gt; (plugin approval rule)</pre>" in text
+        assert shown in text
+
+    @pytest.mark.asyncio
     async def test_emoji_dense_approval_card_fits_in_utf16_units(self):
         """Telegram counts UTF-16 code units (astral emoji = 2), like the adapter's chunker."""
         adapter = _make_adapter()

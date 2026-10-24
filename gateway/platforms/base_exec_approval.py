@@ -4,7 +4,8 @@ The button card (``BasePlatformAdapter._format_exec_approval``) and the plain-te
 ``/approve`` fallback (``gateway.run._format_exec_approval_fallback``) must tell the user
 the same three things: what Hermes wants to run, why it was flagged, and that silence means
 the command does NOT run once ``approvals.timeout`` elapses. Keeping the text here means one
-edit changes every platform; adapters only wrap these strings in their own markup.
+edit changes every platform; adapters only wrap these strings in their own markup. How much of
+the reason a card shows (``ea_reason_budget``) is decided here too.
 
 The ``EA_*`` / ``APPROVAL_TIMED_OUT_NOTICE`` module constants are the English source of truth
 (catalog keys ``gateway.exec_approval.*``); anything that renders the prompt calls the sibling
@@ -73,6 +74,16 @@ def format_approval_window(seconds: int) -> str:
     the tool result's ``user_summary`` — see ``tools.approval_context.format_approval_window``."""
     from tools.approval_context import format_approval_window as _shared
     return _shared(seconds)
+
+
+def ea_reason_budget(adapter, command: str, smart_denied: bool) -> int:
+    """How much of the reason an adapter's card shows: at least its ``_EA_REASON_BUDGET`` (the
+    floor kept beside a long command), else all the room the command leaves. A plugin approval
+    shows only a short label as its command, so its reason gets nearly the whole card. The cut
+    suffix rides outside the budget, so it is taken off here: the command is never cut for it."""
+    room = adapter._exec_approval_cmd_budget("", smart_denied)
+    used = adapter.message_len_fn(adapter._ea_escape(command)) + len("...")
+    return max(adapter._EA_REASON_BUDGET, room - used)
 
 
 def format_approval_deadline_line(timeout_s: int) -> str:

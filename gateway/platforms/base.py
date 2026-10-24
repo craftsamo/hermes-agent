@@ -428,7 +428,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after
 from gateway.platforms.base_exec_approval import (
     approval_timeout_seconds, ea_action_labels, ea_default_reason_text, ea_header_text,
-    ea_reason_label_text, ea_smart_deny_line_text, format_approval_deadline_line)
+    ea_reason_budget, ea_reason_label_text, ea_smart_deny_line_text, format_approval_deadline_line)
 from gateway.platforms.base_streaming_tts import (
     AudioFormat, StreamingTTSHandle, streaming_tts_should_skip_whole_file, streaming_tts_turn_key)
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
@@ -2746,7 +2746,7 @@ class BasePlatformAdapter(ABC):
     _EA_CODE_CLOSE: str = "\n```\n"
     _EA_DEADLINE_PREFIX: str = "\n\n"  # separates the deadline line from the reason line
     _EA_CMD_BUDGET: int = 3000
-    _EA_REASON_BUDGET: int = 0  # 0 = the reason is never truncated
+    _EA_REASON_BUDGET: int = 0  # the reason's floor beside a long command; 0 = never truncated
 
     @property
     def _EA_HEADER(self) -> str:
@@ -2805,7 +2805,7 @@ class BasePlatformAdapter(ABC):
         if description is None:
             description = ea_default_reason_text()
         if self._EA_REASON_BUDGET:
-            description = self._ea_fit(str(description or ""), self._EA_REASON_BUDGET)
+            description = self._ea_fit(str(description or ""), ea_reason_budget(self, str(command or ""), smart_denied))
         cmd_preview = self._ea_fit(
             str(command or ""), self._exec_approval_cmd_budget(description, smart_denied))
         text = (f"{self._EA_HEADER}"
