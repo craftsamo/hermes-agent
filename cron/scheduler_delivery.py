@@ -14,6 +14,7 @@ import contextlib
 import contextvars
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -191,6 +192,37 @@ def _cron_mirror_message(job: dict, text: str) -> str:
     return f"[Cron delivery: {_cron_display_name(job)}]\n{text}"
 
 
+# A job's output may name the thread its brief opens: one ``[TITLE: …]`` line (anywhere, like
+# ``[SILENT]``), stripped before delivery. Lets an event-fired job title its thread from what it
+# found ("Dependabot #12 critical: lodash") rather than the job's fixed name.
+_TITLE_MARKER_RE = re.compile(r"^[ \t]*\[TITLE:[ \t]*(?P<title>[^\]\n]*?)[ \t]*\][ \t]*$", re.MULTILINE)
+_THREAD_TITLE_MAX = 120  # Telegram caps forum topic names at 128; leave room like the gateway's sanitizer
+
+
+def _split_title_marker(content: str) -> tuple[str, Optional[str]]:
+    """``(content without the first [TITLE: …] line, its title or None)``."""
+    match = _TITLE_MARKER_RE.search(content or "")
+    if match is None:
+        return content, None
+    title = match.group("title").strip()
+    start, end = match.span()
+    rest = (content[:start].rstrip("\n") + "\n" + content[end:].lstrip("\n")).strip("\n")
+    return rest, title or None
+
+
+def _cron_thread_title(job: dict) -> str:
+    """Name for the thread a continuable delivery opens: the run's ``[TITLE: …]`` line, else the
+    job's ``thread_title`` field, else ``Hermes — <job name>``. One line, capped, redacted like
+    the job name (both are user- or model-authored and sit beside the scrubbed body)."""
+    for raw in (job.get("_run_thread_title"), job.get("thread_title")):
+        title = " ".join(str(raw or "").split())
+        if title:
+            if len(title) > _THREAD_TITLE_MAX:
+                title = title[:_THREAD_TITLE_MAX - 3].rstrip() + "..."
+            return _redact_cron_payload(title, "thread title")
+    return f"Hermes — {_cron_display_name(job)}"
+
+
 def _maybe_mirror_cron_delivery(
     job: dict, platform_name: str, chat_id: str, mirror_text: str, thread_id: Optional[str] = None,
     user_id: Optional[str] = None, *, enabled: bool = False,
@@ -246,7 +278,7 @@ def _open_continuable_cron_thread(job: dict, adapter, chat_id: str, loop) -> Opt
     create_thread = getattr(adapter, "create_handoff_thread", None)
     if not callable(create_thread) or loop is None:
         return None
-    thread_name = f"Hermes — {_cron_display_name(job)}"
+    thread_name = _cron_thread_title(job)
     try:
         from agent.async_utils import safe_schedule_threadsafe
         coro = create_thread(str(chat_id), thread_name)
@@ -1775,6 +1807,12 @@ def _deliver_result(
     if not targets:
         _record_delivery_verification(job, [])
         return _unresolved_delivery_outcome(job, for_failure)
+    # The run may title the thread its brief opens; the marker never reaches the chat. Stashed
+    # on the job (transient, like the receipts above) for _open_continuable_cron_thread. A worker's
+    # queued send below carries the unsplit ``content``: the gateway splits it here when it drains.
+    queued_content = content
+    content, run_title = _split_title_marker(content)
+    job["_run_thread_title"] = run_title
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
@@ -1788,7 +1826,7 @@ def _deliver_result(
         from cron.delivery_queue import enqueue_and_wait
 
         _record_delivery_verification(job, [])
-        error = enqueue_and_wait(external_execution, job, content, for_failure=for_failure)
+        error = enqueue_and_wait(external_execution, job, queued_content, for_failure=for_failure)
         from cron.delivery_queue import get_status
         delivery_status = get_status(external_execution)
         if delivery_status and delivery_status["status"] == "suppressed":
@@ -1911,6 +1949,7 @@ def _deliver_result(
         job["_notification_all_targets_suppressed"] = True
     else:
         delivery_errors.extend(policy_drop_errors)
+    job.pop("_run_thread_title", None)
     _record_delivery_verification(job, unverified_targets)
     return "; ".join(delivery_errors) if delivery_errors else None
 
