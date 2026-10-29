@@ -128,3 +128,63 @@ def test_create_job_keeps_thread_title(tmp_path, monkeypatch):
         assert job["thread_title"] == "Dependabot fix"
         plain = jobs_api.create_job("p", "1h", name="k")
         assert "thread_title" not in plain
+
+
+class TestCreateDmTopicRetries:
+    """Transient connection/pool errors on ``_create_dm_topic`` retry up to 3 times before giving
+    up (which would otherwise drop the report into the flat DM root); permanent BadRequests and
+    ambiguous read timeouts do not retry."""
+
+    def _adapter(self):
+        from tests.gateway.conftest import _ensure_telegram_mock
+        _ensure_telegram_mock()
+        from gateway.config import PlatformConfig
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+        adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***", extra={}))
+        adapter._bot = AsyncMock()
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_transient_network_error_retries_and_succeeds(self):
+        from types import SimpleNamespace
+        adapter = self._adapter()
+        NetErr, _, _ = adapter._telegram_error_types()
+        adapter._bot.create_forum_topic = AsyncMock(side_effect=[
+            NetErr("httpx.ConnectError"),
+            NetErr("httpx.ConnectError"),
+            SimpleNamespace(message_thread_id=888),
+        ])
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            thread_id = await adapter.create_handoff_thread("123", "Dependabot #121 high: systeminformation")
+        assert thread_id == "888"
+        assert adapter._bot.create_forum_topic.await_count == 3
+        assert [c.args[0] for c in sleep.await_args_list] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_pool_timeout_drains_connections_and_retries(self):
+        from types import SimpleNamespace
+        adapter = self._adapter()
+        _, _, TimedOut = adapter._telegram_error_types()
+        pool_err = TimedOut("Pool timeout: All connections in the connection pool are occupied. Request was *not* sent")
+        adapter._bot.create_forum_topic = AsyncMock(side_effect=[
+            pool_err,
+            SimpleNamespace(message_thread_id=999),
+        ])
+        adapter._drain_general_connections_after_pool_timeout = AsyncMock()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            thread_id = await adapter._create_dm_topic(123, "Dependabot #121")
+        assert thread_id == 999
+        adapter._drain_general_connections_after_pool_timeout.assert_awaited_once()
+        assert adapter._bot.create_forum_topic.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_bad_request_and_ambiguous_timeout_do_not_retry(self):
+        adapter = self._adapter()
+        _, BadReq, TimedOut = adapter._telegram_error_types()
+        for err in (BadReq("Bad Request: chat is not a forum"), TimedOut("Timed out")):
+            adapter._bot.create_forum_topic = AsyncMock(side_effect=err)
+            with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+                assert await adapter._create_dm_topic(123, "Dependabot #121") is None
+            assert adapter._bot.create_forum_topic.await_count == 1
+            sleep.assert_not_awaited()
+
