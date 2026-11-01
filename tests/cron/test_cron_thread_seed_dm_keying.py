@@ -17,7 +17,13 @@ not on SessionSource field shapes — pins the end-to-end contract.
 
 from unittest.mock import MagicMock, patch
 
-from cron.scheduler_delivery import _seed_cron_channel_session, _seed_cron_thread_session
+import pytest
+
+from cron.scheduler_delivery import (
+    _seed_cron_channel_session,
+    _seed_cron_thread_session,
+    _target_is_dm,
+)
 from gateway.config import Platform
 from gateway.session import SessionSource, build_session_key
 
@@ -143,6 +149,47 @@ def test_telegram_forum_topic_seed_key_matches_topic_reply_key():
     )
     assert build_session_key(_seeded_source(store)) == build_session_key(reply_source)
     assert build_session_key(_seeded_source(store)) == "agent:main:telegram:group:-1001234567:77"
+
+
+def test_originless_telegram_dm_topic_seed_key_matches_topic_reply_key():
+    """A job with no captured origin (defined from a manifest, delivering to an explicit
+    ``telegram:<chat>``) that opens a topic in a private chat must seed the ``dm`` row: the
+    Telegram adapter types a private-chat topic reply ``dm``, so a ``group`` seed is a row no
+    reply ever resolves to."""
+    store = MagicMock()
+    adapter = MagicMock()
+    adapter._session_store = store
+
+    with patch("gateway.mirror.mirror_to_session", return_value=True):
+        _seed_cron_thread_session(
+            {"id": "j9", "name": "watch"}, adapter, "telegram", "1234567", "88", "Three bullets",
+            is_dm=_target_is_dm({}, "telegram", "1234567"),
+        )
+
+    reply_source = SessionSource(
+        platform=Platform.TELEGRAM, chat_id="1234567", chat_type="dm", user_id="1234567",
+        thread_id="88",
+    )
+    assert build_session_key(_seeded_source(store)) == build_session_key(reply_source)
+    assert build_session_key(_seeded_source(store)) == "agent:main:telegram:dm:1234567:88"
+
+
+@pytest.mark.parametrize(
+    "origin, platform, chat_id, expected",
+    [
+        ({"chat_type": "dm"}, "slack", "C0AAAAAAAA", True),     # the origin decides when present
+        ({"chat_type": "group"}, "telegram", "1234567", False),
+        ({}, "slack", "D0BJTDCSR7C", True),                      # Slack DM id
+        ({}, "slack", "C0AAAAAAAA", False),
+        ({}, "telegram", "1234567", True),                        # Telegram private chat
+        ({}, "telegram", "-1001234567", False),                   # supergroup / forum
+        ({}, "telegram", "-4567", False),                         # basic group
+        ({}, "discord", "1234567", False),                        # positive ids mean nothing elsewhere
+        ({}, "telegram", "@channel", False),
+    ],
+)
+def test_target_is_dm(origin, platform, chat_id, expected):
+    assert _target_is_dm(origin, platform, chat_id) is expected
 
 
 def test_scoped_dm_thread_seed_key_matches_scoped_reply_key():
