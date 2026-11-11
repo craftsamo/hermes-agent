@@ -1342,14 +1342,15 @@ class TestExecHybridPrivateUrlRouting:
         else:
             assert result["success"] is True, result
             assert [k for k, *_ in self.local_keys] == ["t::local"]
-            assert result["output"] == "_local_default"
+            assert result["output"] == bu_cli._sidecar_daemon_name(bu_cli._task_daemon_name("t"))
 
     def test_sidecar_route_has_its_own_daemon_and_sticks_for_url_less_calls(self):
         """The harness daemon reads BU_CDP_* once at spawn, so the sidecar must not share the cloud
         route's daemon; a follow-up with no URL literal keeps driving the page the last call opened."""
-        steps = [('new_tab("https://example.com/")', "default"),
-                 (f'new_tab("{self.LAN}")', "_local_default"),
-                 ('print(js("document.title"))', "_local_default")]
+        task, sidecar = bu_cli._task_daemon_name("t"), bu_cli._sidecar_daemon_name(bu_cli._task_daemon_name("t"))
+        steps = [('new_tab("https://example.com/")', task),
+                 (f'new_tab("{self.LAN}")', sidecar),
+                 ('print(js("document.title"))', sidecar)]
 
         daemons = [json.loads(bu_cli.browser_exec(code, task_id="t"))["output"] for code, _ in steps]
 
