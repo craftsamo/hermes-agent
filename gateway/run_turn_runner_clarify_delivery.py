@@ -20,9 +20,55 @@ UNDELIVERED = "[clarify prompt could not be delivered]"
 UNDELIVERED_DECLINED = "[clarify prompt could not be delivered: destination refused]"
 # No status adapter (a run whose chat surface is gone).
 UNDELIVERED_NO_SURFACE = "[clarify prompt could not be delivered: no chat surface]"
+# The question's ``context`` did not (verifiably) arrive, so its card was withheld: a card asking about
+# material the user cannot see is the "which plan?" failure the field exists to prevent.
+UNDELIVERED_CONTEXT = "[clarify prompt not shown: its context could not be delivered]"
+# The run was stopped or superseded (/stop, /new) while its context was still uploading.
+ABANDONED_CONTEXT = "[clarify prompt not shown: the conversation moved on while its context was sent]"
 
 # Seconds a scheduled card send may take before it is classified ``ambiguous`` (possibly posted).
 SEND_ACK_WINDOW = 15
+# Context can carry attachments (MEDIA tags), which upload far slower than a card.
+CONTEXT_ACK_WINDOW = 120
+
+
+CONTEXT_POLL = 0.5
+
+
+def deliver_context_before_card(fut, *, still_current: Callable[[], bool]) -> Optional[str]:
+    """Wait for the context send; ``None`` when it arrived and the run is still current, else the
+    sentinel to return instead of a card. Unlike the card, an ``ambiguous`` context send also
+    aborts: the card must never outrun the material it asks about. Polled in short slices so a
+    /stop or /new abandons the wait (cancelling what is left of the upload) instead of posting a
+    stale card into the conversation that replaced this one."""
+    from gateway.run import _approval_send_outcome
+    import concurrent.futures
+    import time
+
+    deadline = time.monotonic() + CONTEXT_ACK_WINDOW
+    while fut is not None and not fut.done():
+        if not still_current():
+            fut.cancel()
+            logger.info("Clarify context abandoned: the run was stopped or superseded")
+            return ABANDONED_CONTEXT
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            fut.result(timeout=min(CONTEXT_POLL, remaining))
+        except concurrent.futures.TimeoutError:
+            continue
+        except Exception:
+            break
+    outcome = _approval_send_outcome(fut, timeout=0)
+    if outcome == "sent" and not still_current():
+        return ABANDONED_CONTEXT
+    if outcome == "sent":
+        return None
+    if fut is not None and not fut.done():
+        fut.cancel()
+    logger.warning("Clarify context send %s; withholding the card", outcome)
+    return UNDELIVERED_DECLINED if outcome == "declined" else UNDELIVERED_CONTEXT
 
 
 def text_fallback_coro(adapter, **send_kwargs):

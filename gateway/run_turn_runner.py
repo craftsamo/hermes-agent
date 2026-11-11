@@ -78,6 +78,12 @@ def _finite_viewer_turn() -> bool:
     return finite_turn_required() is True
 
 
+def _with_clarify_context(question: str, context: Optional[str]) -> str:
+    """The question with the material it refers to above it, for a surface that shows only the
+    question text (a local viewer's modal, the CLI batch panel, a card without a context send)."""
+    return f"{context}\n\n{question}" if context else question
+
+
 def _persisted_turn(agent, agent_history, result, compressions) -> dict | None:
     """``message.complete.persisted_turn`` for this turn, the receipt the TUI gateway's own turns
     publish: clients bind the streamed reply to its stored row instead of comparing words. The
@@ -540,7 +546,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         """Answer the clarify tool's questions (clarify_tool's synchronous contract): one card per
         question, stop at the first the user never answers. The stream/typing re-arm waits for the
         last question — between two cards it only opens a bubble the next boundary closes."""
-        from gateway.run_turn_runner_clarify_delivery import UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE
+        from gateway.run_turn_runner_clarify_delivery import (
+            ABANDONED_CONTEXT, UNDELIVERED, UNDELIVERED_CONTEXT, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE)
         from tools.clarify_gateway import CANCELLED, SKIPPED
         if _finite_viewer_turn():
             # `chat -q` / `-z`: the viewer detaches on the first prompt, so nobody can answer.
@@ -550,8 +557,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         from gateway.session_cli_turn import clarify_batch_turn
         if clarify_batch_turn(self):
             # Main's batch panel (classic CLI, Ink TUI) shows every question at once: one request.
+            # The panel carries question text only, so each question's context rides inside it.
             from gateway.session_clarify_batch import ask_clarify_batch
-            return ask_clarify_batch(self, questions)
+            return ask_clarify_batch(self, [
+                {**{k: v for k, v in entry.items() if k != "context"},
+                 "question": _with_clarify_context(entry["question"], entry.get("context"))}
+                for entry in questions])
         answers: dict[str, Any] = {}
         reply: dict[str, Any] = {"answers": answers, "outcome": "submitted"}
         last = len(questions) - 1
@@ -562,7 +573,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         for index, entry in enumerate(questions):
             question = f"{entry['question']}{hint}"
             raw, answered = self._ask_clarify_question(
-                question, entry["choices"], bool(entry["multi_select"]), rearm=index == last)
+                question, entry["choices"], bool(entry["multi_select"]), rearm=index == last,
+                context=entry.get("context"))
             if raw == CANCELLED:
                 reply["outcome"] = "cancelled"
                 break
@@ -570,17 +582,35 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 # The surface's own no-answer text ("could not be delivered", "did not respond
                 # within Nm") rides along as ``notice``: blank answers alone read as user
                 # inactivity, which is the misreport #112684 describes for an undelivered card.
-                undelivered = raw in (UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE)
+                undelivered = raw in (UNDELIVERED, UNDELIVERED_CONTEXT, ABANDONED_CONTEXT, UNDELIVERED_DECLINED,
+                                      UNDELIVERED_NO_SURFACE)
                 reply.update(outcome="undelivered" if undelivered else "timed_out", notice=raw)
                 break
             answers[entry["qid"]] = None if raw == SKIPPED else raw
         return reply
 
-    def _ask_clarify_question(self, question, choices, multi_select, rearm: bool = True) -> tuple[str, bool]:
-        """One card: register, send, wait, then retire it (no answer) or re-arm (answer).
-        Returns ``(response, answered)``; the caller decides what "no answer" means."""
+    # clarify_tool hands this callback each question's ``context`` as its own field (sent ahead of
+    # the card) instead of folding it into the question text.
+    _clarify_callback_sync.supports_clarify_context = True
+
+    def _clarify_run_still_current(self) -> bool:
+        """False once the user stopped this run or a newer run (``/new``) superseded it: a card
+        must not reach a conversation that moved on while its context was uploading."""
+        if self._agent_interrupted():
+            return False
+        still_current = getattr(self._ctx, "_run_still_current", None)
+        try:
+            return bool(still_current()) if callable(still_current) else True
+        except Exception:
+            return True
+
+    def _ask_clarify_question(self, question, choices, multi_select, rearm: bool = True,
+                              context: Optional[str] = None) -> tuple[str, bool]:
+        """One card: register, send (after its ``context``, when given), wait, then retire it (no
+        answer) or re-arm (answer). Returns ``(response, answered)``; the caller decides what "no
+        answer" means."""
         from gateway.run_turn_runner_clarify_delivery import (
-            UNDELIVERED_NO_SURFACE, _clarify_send_then_wait, text_fallback_coro)
+            UNDELIVERED_NO_SURFACE, _clarify_send_then_wait, deliver_context_before_card, text_fallback_coro)
         from tools import clarify_gateway as clarify_mod
         import uuid
         ctx = self._ctx
@@ -588,6 +618,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # Nothing can render the question: say so, or the batch's blank answers read as
             # user inactivity (#112684).
             return UNDELIVERED_NO_SURFACE, False
+        local_viewer = getattr(getattr(ctx, "source", None), "platform", None) == Platform.LOCAL
+        if context and (local_viewer or not callable(getattr(ctx._status_adapter, "send_clarify_context", None))):
+            # A local viewer (TUI / Desktop / CLI) renders only the prompt — its send() reports success
+            # without showing anything — and a duck-typed surface lacks the context send: both show the
+            # material inside the card instead.
+            question, context = _with_clarify_context(question, context), None
         session_key = ctx.session_key or ""
         clarify_id = uuid.uuid4().hex[:10]
         choices = list(choices) if choices else None
@@ -600,10 +636,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             """Schedule the plain-text prompt when the native card cannot render; None = no such path."""
             coro = text_fallback_coro(ctx._status_adapter, **send_kwargs)
             return None if coro is None else self._schedule(coro, "Clarify text fallback failed to schedule")
-        entry = clarify_mod.register(
-            clarify_id=clarify_id, session_key=session_key, question=question, choices=choices,
-            multi_select=bool(multi_select),
-        )
+
+        def _register():
+            return clarify_mod.register(
+                clarify_id=clarify_id, session_key=session_key, question=question, choices=choices,
+                multi_select=bool(multi_select),
+            )
+        entry = None if context else _register()
         # Unlike approval, clarify passes reopen=True so the continuation re-opens a native stream
         # below the question; if the re-seed fails the consumer degrades to send() automatically.
         self._close_native_stream_boundary("Clarify", t("gateway.clarify.native_stream_placeholder"), reopen=True)
@@ -620,6 +659,20 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 flush(timeout=3.0)
         except Exception:
             logger.debug("Stream-consumer flush before clarify prompt failed", exc_info=True)
+        if context:
+            # Awaited, not best-effort like the flush above: the card goes out only once the
+            # material it asks about has verifiably arrived. The prompt is registered only then,
+            # so a failed or abandoned context leaves no registration to tear down (and never
+            # touches a successor run's prompts under the same session key).
+            context_fut = self._schedule(
+                ctx._status_adapter.send_clarify_context(
+                    ctx._status_chat_id, context, source=ctx.source, session_key=session_key,
+                    metadata=ctx._status_thread_metadata),
+                "Clarify context send failed to schedule")
+            abort = deliver_context_before_card(context_fut, still_current=self._clarify_run_still_current)
+            if abort is not None:
+                return abort, False
+            entry = _register()
         fut = self._schedule(
             self._send_shared_clarify(entry, **send_kwargs),
             "Clarify send failed to schedule",

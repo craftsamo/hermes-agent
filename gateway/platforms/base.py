@@ -420,6 +420,7 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
 import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -2915,6 +2916,74 @@ class BasePlatformAdapter(ABC):
         else:
             text = t("gateway.clarify.question", question=question)
         return await self.send(chat_id=chat_id, content=text, metadata=metadata)
+
+    async def send_clarify_context(
+        self, chat_id: str, content: str, *, source: Optional[SessionSource], session_key: str,
+        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        """Deliver the material a clarify question refers to (a plan, a draft, MEDIA files) before its
+        card, with the final reply's text formatting and MEDIA/image extraction. Bare local paths stay
+        text: a plan naming a path must not send that file. Success only when every part arrived (a
+        MEDIA path the delivery policy drops fails it too), so the caller can withhold a card whose
+        subject never reached the user."""
+        # The attachment helpers address ``event.source.chat_id``; pin it to the prompt's chat.
+        if source is None:
+            source = SessionSource(platform=self.platform, chat_id=str(chat_id))
+        elif str(source.chat_id) != str(chat_id):
+            source = dataclasses.replace(source, chat_id=str(chat_id))
+        target = SimpleNamespace(source=source)
+        force_document = "[[as_document]]" in content
+        dropped: List[dict] = []
+        with self._media_delivery_scope(source):
+            media_files, text = self.extract_media(content)
+            media_files = self.filter_media_delivery_paths(media_files, session_key=session_key, dropped=dropped)
+            images, text = self.extract_images(text)
+            text = _strip_media_directives(text).strip()
+        if dropped:
+            return SendResult(success=False, error=f"{len(dropped)} MEDIA path(s) cannot be delivered")
+        unsupported = self._context_attachment_gap(images, media_files, force_document)
+        if unsupported:
+            # The base senders answer with an "unavailable" notice whose receipt reads as success.
+            return SendResult(success=False, error=f"this surface cannot attach {unsupported}")
+        results: List[Any] = []
+        record = results.append
+        meta = metadata or {}
+        if text:
+            record(await self.send(chat_id=chat_id, content=text, metadata=metadata))
+        # One attachment per send: a batch reports success when ANY item arrived, and every item
+        # here is something the question asks about.
+        for image in images:
+            await self._send_image_batch(target, [image], meta, 0.0, record)
+        for media in media_files:
+            await self._deliver_media_attachments(
+                target, [media], [], force_document_attachments=force_document, human_delay=0.0,
+                metadata=meta, record_delivery=record)
+        failed = [r for r in results if not getattr(r, "success", False)]
+        if not results or failed:
+            error = getattr(failed[0], "error", None) if failed else "nothing deliverable"
+            return SendResult(success=False, error=error or "context delivery failed")
+        return SendResult(success=True, message_id=getattr(results[-1], "message_id", None))
+
+    def _context_attachment_gap(self, images: list, media_files: list, force_document: bool) -> Optional[str]:
+        """The first attachment kind this adapter can only answer with a fallback notice, or None.
+        Mirrors the routing of ``_deliver_media_attachments`` / ``_send_image_batch``."""
+        def native(*names: str) -> bool:
+            return any(getattr(type(self), name, None) is not getattr(BasePlatformAdapter, name)
+                       for name in names)
+        if images and not native("send_multiple_images", "send_image"):
+            return "images"
+        for path, is_voice in media_files:
+            ext = Path(path).suffix.lower()
+            if ext in _IMAGE_EXTS and not is_voice and not force_document:
+                needed, kind = ("send_multiple_images", "send_image_file"), "images"
+            elif should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
+                needed, kind = ("send_voice",), "audio"
+            elif ext in _VIDEO_EXTS:
+                needed, kind = ("send_video",), "video"
+            else:
+                needed, kind = ("send_document",), "files"
+            if not native(*needed):
+                return kind
+        return None
 
     async def send_private_notice(
         self, chat_id: str, user_id: Optional[str], content: str, reply_to: Optional[str] = None,
