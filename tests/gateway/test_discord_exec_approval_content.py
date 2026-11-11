@@ -65,6 +65,19 @@ async def test_exec_approval_content_stays_within_discord_cap_for_long_reason():
     assert "xxx" in sent["content"]  # the command preview is not starved to zero
 
 
+@pytest.mark.asyncio
+async def test_short_command_leaves_the_reason_the_rest_of_the_content():
+    """Past the 300-char floor, a reason beside a short command takes the room the command leaves."""
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+    sent = _capture_channel(adapter)
+    command, reason = "<github_change> (plugin approval rule)", "r" * 1500
+
+    await adapter.send_exec_approval(chat_id="555", command=command, session_key="discord:555", description=reason)
+
+    assert len(sent["content"]) <= adapter.MAX_MESSAGE_LENGTH
+    assert command in sent["content"] and reason in sent["content"]
+
+
 
 def _embed_text(embed):
     # Fields are attribute objects on discord.py and dicts on the test stub.
