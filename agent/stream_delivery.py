@@ -363,6 +363,9 @@ class StreamDeliveryMixin:
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify the display layer that the model is generating tool call arguments (spinner for large payloads)."""
+        if self._stream_writer_superseded():
+            self._note_dropped_stream_writer("_fire_tool_gen_started")
+            return
         self._call_quietly(self.tool_gen_callback, tool_name)
 
     def _has_stream_consumers(self) -> bool:
