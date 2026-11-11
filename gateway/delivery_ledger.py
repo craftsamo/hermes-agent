@@ -19,6 +19,7 @@ import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from gateway.dead_targets import classify_dead_error
@@ -48,6 +49,10 @@ RECONNECTED_MARKER = ("♻️ Recovered reply — the messaging platform reconne
 # of the markers above tells the truth here (no restart, no reconnect): the rate limit gets its own.
 FLOOD_MARKER = ("♻️ Recovered reply — the messaging platform's rate limit refused the original, so part of "
                 "it may already have arrived above:\n\n")
+# A recovered reply can land after newer replies in the same chat (an outage outlasting several turns,
+# or a restart hours later), so the marker is followed by when the reply was written: the reader can
+# tell which turn it answers and discard it when a newer reply already covered it.
+WRITTEN_AT_PREFIX = "🕒 Written "
 
 # Errors whose send contract proves the platform never saw the request: retried as soon as the adapter
 # is back, no backoff. Every other rejection is retried too (#91653: a 5xx or a transient parse error
@@ -91,6 +96,39 @@ def _raw_flood_wait(text: str) -> Optional[float]:
         return float(match.group(1))
     except (TypeError, ValueError):
         return None
+
+
+def written_at_label(created_at: Any) -> str:
+    """When a reply was written, in the gateway's configured timezone (server-local without one); "" when
+    unknown. Never raises: the label is optional and must not stop a redelivery batch."""
+    try:
+        stamp = float(created_at)
+        from hermes_time import get_timezone, safe_strftime
+        try:
+            tz = get_timezone()
+        except Exception:
+            tz = None
+        moment = datetime.fromtimestamp(stamp, tz) if tz is not None else datetime.fromtimestamp(stamp).astimezone()
+        return safe_strftime(moment, "%Y-%m-%d %H:%M %Z").strip()
+    except Exception:
+        return ""
+
+
+def recovery_prefix(marker: str, created_at: Any = None) -> str:
+    """``marker`` followed by the reply's written-at line (the bare marker when the time is unknown)."""
+    label = written_at_label(created_at)
+    return f"{marker}{WRITTEN_AT_PREFIX}{label}\n\n" if label else marker
+
+
+def strip_recovery_prefix(content: str) -> tuple:
+    """(reply body, carried a recovery marker?) — the inverse of ``recovery_prefix`` for any marker."""
+    for marker in (RECOVERED_MARKER, RECONNECTED_MARKER, FLOOD_MARKER):
+        if content.startswith(marker):
+            body = content[len(marker):]
+            if body.startswith(WRITTEN_AT_PREFIX) and "\n\n" in body:
+                body = body.split("\n\n", 1)[1]
+            return body, True
+    return content, False
 
 
 def is_reconnect_only(error: Any) -> bool:
@@ -351,16 +389,18 @@ def _update_state(obligation_id: str, state: str, error: str = "") -> None:
 
 def _claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts, profile, *,
                  needs_marker: bool, runtime: bool = False, flood: bool = False,
-                 last_error: Optional[str] = None) -> dict[str, Any]:
+                 last_error: Optional[str] = None, created_at: Optional[float] = None) -> dict[str, Any]:
     """Claimed-row dict handed back for redelivery. A marked row names its own cause: ``flood`` (a reply
     the rate limit refused, possibly after accepting part of it) gets FLOOD_MARKER at boot or at runtime, a
     ``runtime`` reconnect replay gets RECONNECTED_MARKER, and a boot-recovered crash keeps the runner's
     restart marker default. ``last_error`` is the row's pre-claim error, carried so a runtime claim that is
-    released unsent goes back to ``failed`` with the same error and keeps its retry eligibility."""
+    released unsent goes back to ``failed`` with the same error and keeps its retry eligibility.
+    ``created_at`` rides along so the marker can say when the reply was written."""
     marker = FLOOD_MARKER if flood else (RECONNECTED_MARKER if runtime else None)
     return {"obligation_id": oid, "session_key": session_key, "platform": platform, "chat_id": chat_id,
             "thread_id": thread_id, "content": content, "needs_marker": needs_marker,
-            **({"marker": marker} if needs_marker and marker else {}), "profile": profile,
+            **({"marker": marker} if needs_marker and marker else {}),
+            **({"created_at": created_at} if created_at is not None else {}), "profile": profile,
             **({"runtime_recovery": True} if runtime else {}),
             **({"last_error": last_error} if last_error else {}), "attempts": attempts + 1}
 
@@ -442,7 +482,8 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
                 # the marker.
                 claimed.append(_claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts,
                                             adapter_profile or "default",
-                                            needs_marker=state != "pending" or attempts > 0, flood=flood_row))
+                                            needs_marker=state != "pending" or attempts > 0, flood=flood_row,
+                                            created_at=created_at))
     return claimed
 
 
@@ -501,7 +542,8 @@ def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
                 # claim released unsent keeps its flood retry eligibility.
                 claimed.append(_claimed_row(oid, session_key, row_platform, chat_id, thread_id, content,
                                             attempts, adapter_profile, needs_marker=True, runtime=True,
-                                            flood=is_flood_error(last_error), last_error=last_error))
+                                            flood=is_flood_error(last_error), last_error=last_error,
+                                            created_at=created_at))
     return claimed
 
 

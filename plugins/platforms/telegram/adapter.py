@@ -1716,11 +1716,15 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         # First proof getUpdates is flowing for this generation: flip a
         # published "retrying" (degraded connect, reconnect stamp, or the
         # mid-session recovery below) back to "connected" (#101391).
-        if self._send_path_degraded and getattr(self, "_running", False) and not self.has_fatal_error:
+        recovered = self._send_path_degraded and getattr(self, "_running", False) and not self.has_fatal_error
+        if recovered:
             self._write_runtime_status_safe(
                 "connected", platform_state="connected", error_code=None, error_message=None,
             )
         self._send_path_degraded = False
+        if recovered:
+            # Replies rejected while degraded go out now, not at the next restart.
+            self._schedule_send_path_recovery_redelivery()
         return True
 
     def _observe_polling_request_result(self, request, generation, result):
