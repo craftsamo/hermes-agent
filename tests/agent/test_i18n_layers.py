@@ -114,6 +114,39 @@ def test_overlay_is_profile_scoped_across_two_homes(tmp_path, monkeypatch, clean
     assert i18n.t(_KEY, lang="de") == "Nur A"
 
 
+def test_bundled_catalog_is_parsed_once_across_profile_homes(tmp_path, monkeypatch, clean_layers):
+    """A multiplexed gateway serves many homes; the bundled catalog is the same file for all of them, so
+    A → B → A parses it once while each home still gets its own merged view."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home_a, home_b = tmp_path / "a", tmp_path / "b"
+    (home_a / "locales").mkdir(parents=True)
+    home_b.mkdir()
+    (home_a / "locales" / "de.yaml").write_text(yaml.safe_dump({"approval": {"denied": "Nur A"}}), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    i18n.reset_language_cache()
+    bundled_path = i18n._locales_dir() / "de.yaml"
+    parsed = []
+    real_parse = i18n_layers.parse_locale_file
+
+    def _counting_parse(path):
+        if path == bundled_path:
+            parsed.append(path)
+        return real_parse(path)
+
+    monkeypatch.setattr(i18n_layers, "parse_locale_file", _counting_parse)
+
+    assert i18n.t(_KEY, lang="de") == "Nur A"
+    token = set_hermes_home_override(home_b)
+    try:
+        assert i18n.t(_KEY, lang="de") != "Nur A"
+    finally:
+        reset_hermes_home_override(token)
+    assert i18n.t(_KEY, lang="de") == "Nur A"
+
+    assert len(parsed) == 1
+
+
 # ── plugin packs through the real loader ──────────────────────────────────────────────────────
 
 
