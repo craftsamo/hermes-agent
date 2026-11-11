@@ -72,6 +72,21 @@ class TestThinkingOffIsSentExplicitly:
         assert _kwargs(model, {"enabled": False})["thinking"] == {"type": "between_tools"}
         assert _kwargs("claude-sonnet-5", {"enabled": False})["thinking"] == {"type": "disabled"}
 
+    @pytest.mark.parametrize(
+        "base_url, expected",
+        [
+            (None, {"type": "between_tools"}),
+            ("https://api.anthropic.com", {"type": "between_tools"}),
+            # Portal's /v1/messages 400s on ``between_tools`` ("Invalid Anthropic Messages API
+            # request") and on ``disabled`` ("Reasoning is mandatory"); omission is the only 200.
+            ("https://inference-api.nousresearch.com/v1", None),
+            ("https://bedrock-runtime.us-east-1.amazonaws.com", None),
+        ],
+    )
+    def test_between_tools_off_shape_follows_the_endpoint(self, base_url, expected) -> None:
+        kwargs = _kwargs("anthropic/claude-sonnet-5.5", {"enabled": False}, base_url=base_url)
+        assert kwargs.get("thinking") == expected
+
     def test_legacy_manual_thinking_models_keep_the_omission(self) -> None:
         """Pre-4.6 thinking is opt-in via budget_tokens: absence IS off."""
         kwargs = _kwargs("claude-sonnet-4-5", {"enabled": False})
