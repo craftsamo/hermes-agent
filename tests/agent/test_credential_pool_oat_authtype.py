@@ -42,7 +42,7 @@ def test_load_heals_legacy_row_and_exposes_it_to_resolver(tmp_path, monkeypatch)
     auth_file.write_text(json.dumps({
         "version": 1,
         "credential_pool": {
-            "anthropic": [{
+            "anthropic-oauth": [{
                 "id": "legacy-oat",
                 "label": "Legacy setup token",
                 "auth_type": AUTH_TYPE_API_KEY,
@@ -56,10 +56,10 @@ def test_load_heals_legacy_row_and_exposes_it_to_resolver(tmp_path, monkeypatch)
     from agent.anthropic_credentials import resolve_anthropic_token
     from agent.credential_pool import load_pool
 
-    entry = load_pool("anthropic").entries()[0]
+    entry = load_pool("anthropic-oauth").entries()[0]
     persisted = json.loads(auth_file.read_text())
     assert entry.auth_type == AUTH_TYPE_OAUTH
-    assert persisted["credential_pool"]["anthropic"][0]["auth_type"] == AUTH_TYPE_OAUTH
-    assert resolve_anthropic_token() == token
+    assert persisted["credential_pool"]["anthropic-oauth"][0]["auth_type"] == AUTH_TYPE_OAUTH
+    assert resolve_anthropic_token(provider="anthropic-oauth") == token
 
 

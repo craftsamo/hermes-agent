@@ -115,19 +115,19 @@ def claude_code_only_env(tmp_path, monkeypatch):
 
 
 def test_claude_code_file_detected_by_model_picker(claude_code_only_env):
-    """anthropic should appear when credentials only exist in ~/.claude/.credentials.json."""
+    """anthropic-oauth should appear when credentials only exist in ~/.claude/.credentials.json."""
     from hermes_cli.model_switch import list_authenticated_providers
 
     providers = list_authenticated_providers(
-        current_provider="anthropic",
+        current_provider="anthropic-oauth",
         max_models=10,
     )
     slugs = [p["slug"] for p in providers]
-    assert "anthropic" in slugs, (
-        f"anthropic not found in /model picker providers: {slugs}"
+    assert "anthropic-oauth" in slugs, (
+        f"anthropic-oauth not found in /model picker providers: {slugs}"
     )
 
-    anthropic = next(p for p in providers if p["slug"] == "anthropic")
+    anthropic = next(p for p in providers if p["slug"] == "anthropic-oauth")
     assert anthropic["is_current"] is True
     assert anthropic["total_models"] > 0
 

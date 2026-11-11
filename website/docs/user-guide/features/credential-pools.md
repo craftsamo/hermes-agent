@@ -61,8 +61,9 @@ hermes auth add openrouter --type oauth
 # Add a second Anthropic key
 hermes auth add anthropic --type api-key --api-key sk-ant-api03-your-second-key
 
-# Add an Anthropic OAuth credential (requires Claude Max plan + extra usage credits)
-hermes auth add anthropic --type oauth
+# Add a Claude Pro/Max OAuth login (requires Claude Max plan + extra usage credits).
+# Subscription logins are the separate `anthropic-oauth` provider with its own pool.
+hermes auth add anthropic-oauth
 # Opens browser for OAuth login
 ```
 
@@ -78,10 +79,13 @@ openrouter (2 credentials):
   #1  OPENROUTER_API_KEY   api_key id=ab12cd34 priority=0 env:OPENROUTER_API_KEY ←
   #2  backup-key           api_key id=ef56gh78 priority=1 manual
 
-anthropic (3 credentials):
+anthropic (2 credentials):
+  #1  main                 api_key id=12ab34cd priority=0 manual ←
+  #2  ANTHROPIC_API_KEY    api_key id=ef56gh78 priority=1 env:ANTHROPIC_API_KEY
+
+anthropic-oauth (2 credentials):
   #1  hermes_pkce          oauth   id=ab12cd34 priority=0 hermes_pkce ←
   #2  claude_code          oauth   id=cd34ef56 priority=1 claude_code
-  #3  ANTHROPIC_API_KEY    api_key id=ef56gh78 priority=2 env:ANTHROPIC_API_KEY
 ```
 
 The `←` marks the currently selected credential. `id=` is the entry id accepted by

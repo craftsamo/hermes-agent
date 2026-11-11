@@ -24,7 +24,7 @@ def test_anthropic_subscription_exhausted_guidance():
     the cycle-reset option, not the generic 'add credits' line."""
     msg = _billing_or_entitlement_message(
         capability="model access",
-        provider="anthropic",
+        provider="anthropic-oauth",
         base_url="https://api.anthropic.com",
         model="claude-opus-4-7",
     )
@@ -62,7 +62,7 @@ def test_non_anthropic_billing_guidance_unaffected():
 def _anthropic_msg(*, unverified: bool) -> str:
     return _billing_or_entitlement_message(
         capability="model access",
-        provider="anthropic",
+        provider="anthropic-oauth",
         base_url="https://api.anthropic.com",
         model="claude-opus-5",
         unverified=unverified,

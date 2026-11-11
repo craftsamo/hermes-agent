@@ -48,7 +48,7 @@ from agent.credential_pool import (
 
 def _entry(*, id: str, access_token: str, refresh_token: str, source: str) -> PooledCredential:
     return PooledCredential(
-        provider="anthropic",
+        provider="anthropic-oauth",
         id=id,
         label="anthropic oauth",
         auth_type=AUTH_TYPE_OAUTH,
@@ -145,8 +145,8 @@ def test_concurrent_hermes_pkce_refresh_loses_credential_despite_valid_token_on_
 
     # Simulate two independent OS processes, each with its own in-memory
     # pool constructed from the SAME on-disk stale entry.
-    pool_process_a = CredentialPool("anthropic", [dc_replace(shared_stale_entry)])
-    pool_process_b = CredentialPool("anthropic", [dc_replace(shared_stale_entry)])
+    pool_process_a = CredentialPool("anthropic-oauth", [dc_replace(shared_stale_entry)])
+    pool_process_b = CredentialPool("anthropic-oauth", [dc_replace(shared_stale_entry)])
 
     results: dict[str, object] = {}
 

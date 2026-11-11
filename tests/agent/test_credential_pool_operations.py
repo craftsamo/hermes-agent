@@ -64,7 +64,7 @@ def test_priority_persists_contiguous_order_without_clearing_cooldown():
 
 
 def test_priority_honors_anthropic_manual_first():
-    pool = _pool("anthropic")
-    pool._entries[1] = replace(pool._entries[1], source="env:ANTHROPIC_API_KEY")
+    pool = _pool("anthropic-oauth")
+    pool._entries[1] = replace(pool._entries[1], source="env:ANTHROPIC_TOKEN")
     assert pool.move_entry("row1", 0).priority == 1
     assert [e.id for e in pool.entries()] == ["row0", "row1"]

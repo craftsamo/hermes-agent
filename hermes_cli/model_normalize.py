@@ -33,7 +33,7 @@ _AGGREGATOR_PROVIDERS: frozenset[str] = frozenset({
 
 # Providers that want bare names with dots replaced by hyphens.
 _DOT_TO_HYPHEN_PROVIDERS: frozenset[str] = frozenset({
-    "anthropic"})
+    "anthropic", "anthropic-oauth"})
 
 # Providers that want bare names with dots preserved.
 _STRIP_VENDOR_ONLY_PROVIDERS: frozenset[str] = frozenset({
@@ -224,6 +224,8 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
 
     if provider in _DOT_TO_HYPHEN_PROVIDERS:
         bare = _strip_matching_provider_prefix(name, provider)
+        if provider == "anthropic-oauth":  # the subscription lane serves the ``anthropic/`` vendor catalog
+            bare = _strip_matching_provider_prefix(bare, "anthropic")
         return bare if "/" in bare else _dots_to_hyphens(bare)
 
     # Copilot's own normalizer knows the alias table (vendor stripping, dash-to-dot repair for Claude)
