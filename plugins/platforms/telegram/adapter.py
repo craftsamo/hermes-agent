@@ -2527,16 +2527,40 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         """Create a forum topic in a private (DM) chat (Bot API 9.4+); message_thread_id or None."""
         if not self._bot:
             return None
+        kwargs: dict[str, Any] = {"chat_id": chat_id, "name": name}
+        if icon_color is not None:
+            kwargs["icon_color"] = icon_color
+        if icon_custom_emoji_id:
+            kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
+        _NetErr, _BadReq, _TimedOut = self._telegram_error_types()
         try:
-            kwargs: dict[str, Any] = {"chat_id": chat_id, "name": name}
-            if icon_color is not None:
-                kwargs["icon_color"] = icon_color
-            if icon_custom_emoji_id:
-                kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
-            topic = await self._bot.create_forum_topic(**kwargs)
-            thread_id = topic.message_thread_id
-            logger.info("[%s] Created DM topic '%s' in chat %s -> thread_id=%s", self.name, name, chat_id, thread_id)
-            return thread_id
+            for _attempt in range(3):
+                try:
+                    topic = await self._bot.create_forum_topic(**kwargs)
+                    thread_id = topic.message_thread_id
+                    logger.info("[%s] Created DM topic '%s' in chat %s -> thread_id=%s", self.name, name, chat_id, thread_id)
+                    return thread_id
+                except _NetErr as net_err:
+                    # BadRequest subclasses NetworkError in PTB, and a plain TimedOut may have
+                    # reached Telegram (don't duplicate the topic); only connection/pool failures
+                    # that never left are retried, like _send_chunk_with_retries.
+                    if _BadReq and isinstance(net_err, _BadReq):
+                        raise
+                    is_pool_timeout = self._looks_like_pool_timeout(net_err)
+                    if (
+                        _TimedOut and isinstance(net_err, _TimedOut)
+                        and not self._looks_like_connect_timeout(net_err) and not is_pool_timeout
+                    ):
+                        raise
+                    if is_pool_timeout:
+                        await self._drain_general_connections_after_pool_timeout()
+                    if _attempt >= 2:
+                        raise
+                    wait = 2 ** _attempt
+                    logger.warning(
+                        "[%s] Network error creating DM topic '%s' in chat %s (attempt %d/3), retrying in %ds: %s",
+                        self.name, name, chat_id, _attempt + 1, wait, _redact_telegram_error_text(net_err))
+                    await asyncio.sleep(wait)
         except Exception as e:
             error_text = str(e).lower()
             # Telegram has no "list topics" API: an existing topic is mapped from incoming messages.
